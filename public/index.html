@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="AI Financial Controller Dashboard" />
+    <title>AI Financial Controller</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+    <!-- SIGNUP / ONBOARDING OVERLAY -->
+    <div id="signup-overlay" class="signup-overlay">
+        <div class="glass-card signup-card">
+            <h2 class="text-brand">Welcome to AI Financial Controller</h2>
+            <p class="text-muted text-sm" style="margin-bottom: 1.5rem;">Please connect your integrations to monitor your business, or try Demo Mode.</p>
+            
+            <form id="signup-form" class="signup-form">
+                <div class="form-group">
+                    <label for="input-name">Your Name</label>
+                    <input type="text" id="input-name" placeholder="e.g. Jane Doe" required />
+                </div>
+                <div class="form-group">
+                    <label for="input-company">Company Name</label>
+                    <input type="text" id="input-company" placeholder="e.g. Acme Corp" required />
+                </div>
+                <div class="form-group">
+                    <label for="input-zoho">Zoho API Key</label>
+                    <input type="password" id="input-zoho" placeholder="Optional" />
+                </div>
+                <div class="form-group">
+                    <label for="input-wallet">Avalanche Wallet Address</label>
+                    <input type="text" id="input-wallet" placeholder="0x..." />
+                </div>
+                
+                <div class="signup-actions">
+                    <button type="submit" class="btn-primary">Connect & Start</button>
+                    <button type="button" id="btn-demo-mode" class="btn-secondary">Skip to Demo Mode</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div id="toast-container" class="toast-container" role="status" aria-live="polite"></div>
+    
+    <div class="dashboard-layout">
+        <!-- SIDEBAR -->
+        <nav class="sidebar">
+            <div class="brand">
+                <div class="brand-text">
+                    <h2>AI Financial Controller</h2>
+                    <p>"Your finance department in one screen."</p>
+                </div>
+            </div>
+            
+            <ul class="nav-links">
+                <li><a href="#" class="active">🏠 Controller Overview</a></li>
+                <li><a href="#">💰 Cash Flow</a></li>
+                <li><a href="#">📈 Revenue Intelligence</a></li>
+                <li><a href="#">🛡 Fraud & Risk</a></li>
+                <li><a href="#">📄 Audit Findings</a></li>
+                <li><a href="#">🏢 Vendors</a></li>
+                <li><a href="#">👥 Customers</a></li>
+                <li><a href="#">🤖 AI Controller</a></li>
+                <li><a href="#">⚙ Settings</a></li>
+            </ul>
+
+            <div class="sidebar-bottom">
+                <div class="session-picker">
+                    <p class="section-title">TARGET SESSION</p>
+                    <div id="month-list" class="month-list"></div>
+                </div>
+                <div id="status" class="status-indicator hidden"></div>
+            </div>
+        </nav>
+
+        <!-- MAIN CONTENT -->
+        <main class="main-content">
+            <!-- HEADER -->
+            <header class="top-header">
+                <div>
+                    <h1 class="page-title">Controller Overview</h1>
+                    <p id="company-context" class="company-context">Company: ABC Traders Ltd</p>
+                </div>
+                <div class="header-actions">
+                    <span id="analysis-month" class="badge">Select Target Session</span>
+                    <button id="theme-toggle" class="icon-btn">🌓</button>
+                    <button id="profile-toggle" class="icon-btn">👤</button>
+                </div>
+            </header>
+
+            <!-- PROFILE POPOVER -->
+            <aside id="profile-popover" class="glass-card profile-popover hidden">
+                <div class="panel-head">
+                    <h2>System Identity</h2>
+                    <button id="refresh-profile" class="btn-small">Sync</button>
+                </div>
+                <div id="profile-content"></div>
+            </aside>
+
+            <!-- DASHBOARD GRID -->
+            <div id="dashboard-grid" class="dashboard-grid">
+                
+                <!-- ROW 1: KPIs -->
+                <div class="kpi-row">
+                    <div class="glass-card kpi-card">
+                        <span class="kpi-label">Health Score</span>
+                        <div class="kpi-value text-emerald" id="kpi-health">81/100</div>
+                    </div>
+                    <div class="glass-card kpi-card">
+                        <span class="kpi-label">Cash Runway</span>
+                        <div class="kpi-value text-amber" id="kpi-runway">-- Days</div>
+                    </div>
+                    <div class="glass-card kpi-card">
+                        <span class="kpi-label">Risk Alerts</span>
+                        <div class="kpi-value text-red" id="kpi-alerts">--</div>
+                    </div>
+                    <div class="glass-card kpi-card">
+                        <span class="kpi-label">Revenue Trend</span>
+                        <div class="kpi-value text-emerald" id="kpi-revenue">+12%</div>
+                    </div>
+                </div>
+
+                <!-- ROW 2: Findings & Summary -->
+                <div class="grid-row-2">
+                    <div class="glass-card findings-card">
+                        <h3 class="card-title">Critical Findings</h3>
+                        <ul class="findings-list" id="findings-list">
+                            <!-- Populated dynamically -->
+                            <li class="empty-state text-muted text-sm">No findings compiled yet. Select a session.</li>
+                        </ul>
+                    </div>
+                    
+                    <div class="glass-card ai-summary-card glow-border">
+                        <h3 class="card-title text-brand">🤖 AI Controller Summary</h3>
+                        <div id="ai-summary-content" class="ai-summary-content">
+                            <div class="placeholder-box">
+                                <p>Select a session to generate insights.</p>
+                                <p class="text-muted text-sm">"What is wrong, why is it happening, and what should I do next?"</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ROW 3: Forecast -->
+                <div class="glass-card forecast-card">
+                    <h3 class="card-title">Cash Flow Forecast</h3>
+                    <div class="forecast-viz" id="forecast-viz">
+                        <div class="forecast-bar-container">
+                            <div class="bar-current">Current</div>
+                            <div class="bar-projection">Future Projection</div>
+                            <div class="bar-risk">Risk Zone</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ROW 4: Fraud & Expenses -->
+                <div class="grid-row-4">
+                    <div class="glass-card fraud-card">
+                        <h3 class="card-title">Fraud Watch</h3>
+                        <ul class="fraud-list" id="fraud-list">
+                            <li><span class="dot amber"></span> Suspicious Payments</li>
+                            <li><span class="dot amber"></span> Weekend Transactions</li>
+                            <li><span class="dot red"></span> Split Invoices</li>
+                        </ul>
+                    </div>
+                    
+                    <div class="glass-card expense-card">
+                        <h3 class="card-title">Expense Breakdown</h3>
+                        <div class="expense-bars" id="expense-list">
+                            <div class="expense-item"><span>Operations</span> <span>45%</span></div>
+                            <div class="expense-item"><span>Transport</span> <span>20%</span></div>
+                            <div class="expense-item"><span>Salaries</span> <span>25%</span></div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- CHAT INTERFACE (BOTTOM) -->
+            <div class="chat-section glass-card">
+                <div class="chat-header-small">Ask Your AI Controller</div>
+                
+                <div id="chat-feed" class="chat-feed">
+                    <div class="chat-messages"></div>
+                    <div id="analysis-stream" class="analysis-stream hidden"></div>
+                </div>
+
+                <div class="chat-input-wrapper">
+                    <input type="text" id="chat-input" class="chat-input" placeholder='"Why is cash running low?" or "Which customer owes us the most?"' autocomplete="off" />
+                    <button type="button" id="chat-send" class="btn-primary">Ask</button>
+                </div>
+                <div id="chat-context-hint" class="chat-context-hint"></div>
+            </div>
+
+        </main>
+    </div>
+
+    <script src="/app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,69 @@
+{
+  "company": {
+    "name": "Demo SME Ltd",
+    "country": "Kenya"
+  },
+  "period": "2026-05",
+  "transactions": [
+    {
+      "date": "2026-05-03",
+      "account": "Main Bank",
+      "amount": 52000,
+      "description": "Supplier payment - office stock",
+      "counterparty": "ABC Traders"
+    },
+    {
+      "date": "2026-05-06",
+      "account": "Main Bank",
+      "amount": 50000,
+      "description": "Cash withdrawal owner",
+      "counterparty": "Owner"
+    },
+    {
+      "date": "2026-05-06",
+      "account": "Main Bank",
+      "amount": 50000,
+      "description": "Cash withdrawal owner",
+      "counterparty": "Owner"
+    },
+    {
+      "date": "2026-05-09",
+      "account": "Main Bank",
+      "amount": 120000,
+      "description": "Consulting expense",
+      "counterparty": "Unknown Vendor"
+    }
+  ],
+  "journalEntries": [
+    {
+      "date": "2026-05-03",
+      "debitAccount": "Inventory",
+      "creditAccount": "Main Bank",
+      "amount": 52000
+    },
+    {
+      "date": "2026-05-09",
+      "debitAccount": "Consulting",
+      "creditAccount": "Main Bank",
+      "amount": 120000
+    }
+  ],
+  "reconciliations": [
+    {
+      "accountName": "Main Bank",
+      "isReconciled": false
+    }
+  ],
+  "statements": {
+    "cashFlow": {
+      "inflow": 450000,
+      "outflow": 620000
+    },
+    "profitAndLoss": {
+      "netIncome": -90000
+    },
+    "balanceSheet": {
+      "cashAndEquivalents": 400000
+    }
+  }
+}

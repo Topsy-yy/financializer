@@ -1,0 +1,23 @@
+{
+  "name": "ai-financial-controller-skills",
+  "version": "0.1.0",
+  "description": "Composable skills for monthly SME finance risk review",
+  "skills": [
+    {
+      "id": "financial-controller-core",
+      "path": "skills/financial-controller-core/SKILL.md"
+    },
+    {
+      "id": "zoho-fetcher",
+      "path": "skills/zoho-fetcher/SKILL.md"
+    },
+    {
+      "id": "fraud-and-errors-detector",
+      "path": "skills/fraud-and-errors-detector/SKILL.md"
+    },
+    {
+      "id": "followup-orchestrator",
+      "path": "skills/followup-orchestrator/SKILL.md"
+    }
+  ]
+}

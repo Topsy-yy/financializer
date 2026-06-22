@@ -1,0 +1,17 @@
+{
+  "name": "AI Financial Controller",
+  "short_name": "FinCtrl",
+  "description": "AI-powered financial analysis for Kenyan SMEs — pull books from Zoho, score cash-flow risk, generate founder-friendly reports.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f4f7f2",
+  "theme_color": "#0f766e",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
