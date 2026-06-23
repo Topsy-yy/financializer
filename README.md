@@ -120,3 +120,489 @@ These artifacts are useful for audit trail, review, and spreadsheet import.
   Change PORT in .env, then restart.
 - Empty or failed monthly review:
   Verify directApiUrl, API credentials, and payload shape from your data source.
+
+
+Now using the skills creation knowledge.. use it to create the following skills
+
+
+# 1. zoho-fetcher
+
+## Purpose
+
+Retrieve and validate monthly financial data from Zoho Books and normalize it into a consistent structure for downstream analysis.
+
+## Responsibilities
+
+* Fetch accounting records
+* Validate schema integrity
+* Detect missing datasets
+* Standardize field names
+* Generate ingestion diagnostics
+
+## Inputs
+
+{
+"zoho_direct_api_url": "",
+"period_start": "",
+"period_end": ""
+}
+
+## Outputs
+
+{
+"transactions": [],
+"journalEntries": [],
+"reconciliations": [],
+"cashFlow": {},
+"balanceSheet": {},
+"ingestion_diagnostics": []
+}
+
+## Success Criteria
+
+* Data available
+* Structure valid
+* Ready for analysis
+
+---
+
+# 2. fraud-and-errors-detector
+
+## Purpose
+
+Detect accounting anomalies and operational red flags that may indicate bookkeeping errors, policy violations, or potential fraud indicators.
+
+## Responsibilities
+
+Detect:
+
+* Duplicate transactions
+* Duplicate invoices
+* Round-number payments
+* Statistical outliers
+* Missing fields
+* Missing references
+* Personal/business expense mixing
+* Unreconciled transactions
+* Unusual transaction timing
+
+## Inputs
+
+{
+"transactions": [],
+"journalEntries": [],
+"owner_keywords": []
+}
+
+## Outputs
+
+{
+"findings": [],
+"risk_score": 0
+}
+
+## Positioning
+
+Indicator engine only.
+
+Never claims fraud occurred.
+
+---
+
+# 3. cashflow-risk-analyzer
+
+## Purpose
+
+Assess liquidity health and identify future cash flow risks before they become operational problems.
+
+## Responsibilities
+
+Calculate:
+
+* Cash runway
+* Operating liquidity
+* Cash trend
+* Receivables pressure
+* Payables pressure
+* Payroll coverage
+
+Detect:
+
+* Negative cash trajectory
+* Potential cash shortages
+* Delayed customer collections
+
+## Inputs
+
+{
+"cashFlow": {},
+"transactions": [],
+"accountsReceivable": [],
+"accountsPayable": []
+}
+
+## Outputs
+
+{
+"cash_runway_days": 0,
+"risk_level": "",
+"findings": [],
+"recommendations": []
+}
+
+## Business Value
+
+Answers:
+
+"Will the company run out of cash?"
+
+---
+
+# 4. revenue-intelligence
+
+## Purpose
+
+Analyze revenue performance and identify growth or decline patterns affecting business stability.
+
+## Responsibilities
+
+Measure:
+
+* Revenue growth
+* Revenue decline
+* Customer activity
+* Seasonal trends
+* Revenue volatility
+
+Detect:
+
+* Lost customers
+* Shrinking customers
+* Revenue concentration shifts
+
+## Inputs
+
+{
+"invoices": [],
+"payments": [],
+"customers": []
+}
+
+## Outputs
+
+{
+"revenue_summary": {},
+"findings": [],
+"trends": []
+}
+
+## Business Value
+
+Answers:
+
+"Is revenue getting healthier or worse?"
+
+---
+
+# 5. vendor-dependency-detector
+
+## Purpose
+
+Identify excessive dependence on suppliers and procurement concentration risks.
+
+## Responsibilities
+
+Analyze:
+
+* Vendor spend distribution
+* Single-vendor exposure
+* Procurement concentration
+
+Detect:
+
+* Supplier dominance
+* Procurement imbalance
+
+## Inputs
+
+{
+"vendors": [],
+"expenses": [],
+"bills": []
+}
+
+## Outputs
+
+{
+"vendor_risk_score": 0,
+"findings": []
+}
+
+## Business Value
+
+Answers:
+
+"What happens if this supplier disappears tomorrow?"
+
+---
+
+# 6. customer-concentration-detector
+
+## Purpose
+
+Identify overreliance on specific customers that could threaten future revenue stability.
+
+## Responsibilities
+
+Calculate:
+
+* Revenue contribution by customer
+* Customer dependency ratios
+
+Detect:
+
+* Customer concentration
+* Revenue concentration
+
+## Inputs
+
+{
+"customers": [],
+"invoices": [],
+"payments": []
+}
+
+## Outputs
+
+{
+"customer_risk_score": 0,
+"findings": []
+}
+
+## Business Value
+
+Answers:
+
+"Which customer could cripple the company if they leave?"
+
+---
+
+# 7. financial-health-scorer
+
+## Purpose
+
+Convert findings from all analysis skills into a single executive-level financial health assessment.
+
+## Responsibilities
+
+Aggregate:
+
+* Fraud indicators
+* Cash flow risk
+* Revenue stability
+* Vendor dependency
+* Customer dependency
+* Data quality
+
+Generate:
+
+* Weighted score
+* Risk category
+* Executive summary
+
+## Inputs
+
+{
+"fraud_results": {},
+"cashflow_results": {},
+"revenue_results": {},
+"vendor_results": {},
+"customer_results": {}
+}
+
+## Outputs
+
+{
+"overall_score": 0,
+"risk_category": "",
+"summary": ""
+}
+
+## Business Value
+
+Creates the dashboard headline metric.
+
+---
+
+# 8. financial-controller-core
+
+## Purpose
+
+Act as the AI Financial Controller by orchestrating all analysis skills, consolidating findings, generating management insights, and producing the final review.
+
+## Responsibilities
+
+1. Fetch data
+2. Validate data
+3. Run analyses
+4. Aggregate findings
+5. Score business health
+6. Generate report
+7. Trigger follow-up actions
+
+## Inputs
+
+{
+"business_name": "",
+"business_address": "",
+"alert_recipients": []
+}
+
+## Outputs
+
+{
+"overall_risk": "",
+"financial_health_score": 0,
+"summary": "",
+"findings": [],
+"recommendations": [],
+"next_actions": []
+}
+
+## Positioning
+
+This is the virtual financial controller.
+
+Not an auditor.
+Not an accountant.
+Not a CFO.
+
+A controller.
+
+---
+
+# 9. followup-orchestrator
+
+## Purpose
+
+Transform detected risks into trackable actions that business owners can execute.
+
+## Responsibilities
+
+Generate:
+
+* Tasks
+* Priorities
+* Due dates
+* Owners
+
+Export:
+
+* JSON
+* CSV
+* Notification payloads
+
+## Inputs
+
+{
+"findings": [],
+"risk_level": ""
+}
+
+## Outputs
+
+{
+"tasks": [],
+"csv_export": "",
+"notifications": []
+}
+
+---
+
+# 10. recommendation-engine
+
+## Purpose
+
+Convert findings into specific management actions.
+
+## Responsibilities
+
+Generate actionable recommendations from:
+
+* Revenue decline
+* Cash flow risks
+* Vendor risks
+* Customer concentration
+* Fraud indicators
+* Data quality issues
+
+## Example Output
+
+Revenue declining.
+
+Recommended Actions:
+
+* Contact Customer ABC within 48 hours.
+* Review contracts generating less than 10% margin.
+* Accelerate collection of invoices older than 30 days.
+
+## Inputs
+
+{
+"findings": [],
+"risk_scores": {}
+}
+
+## Outputs
+
+{
+"recommendations": []
+}
+
+---
+
+# 11. executive-report-generator
+
+## Purpose
+
+Convert technical findings into founder-friendly language that can be understood without accounting expertise.
+
+## Responsibilities
+
+Translate:
+
+* Financial metrics
+* Risk scores
+* Anomaly findings
+* Trend analysis
+
+Into:
+
+* Plain-language summaries
+* Executive insights
+* Priority actions
+
+## Example
+
+Technical Finding:
+Customer concentration ratio = 58%
+
+Executive Explanation:
+More than half of your revenue comes from a single customer. If this customer leaves, the business could experience a significant cash flow shock.
+
+## Inputs
+
+{
+"all_findings": [],
+"risk_scores": {},
+"recommendations": []
+}
+
+## Outputs
+
+{
+"executive_summary": "",
+"management_report": "",
+"priority_actions": []
+}
+
