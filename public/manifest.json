@@ -1,5 +1,5 @@
 {
-  "name": "AI Financial Controller",
+  "name": "FinGuard AI",
   "short_name": "FinCtrl",
   "description": "AI-powered financial analysis for Kenyan SMEs — pull books from Zoho, score cash-flow risk, generate founder-friendly reports.",
   "start_url": "/",

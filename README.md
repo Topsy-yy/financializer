@@ -1,608 +1,196 @@
-# AI Financial Controller - Skills-Based App
+# FinGuard AI Financial Controller
 
-This repository is the working prototype for a monthly SME finance risk review tool.
-It combines a simple Express API, a web dashboard, and skill definitions to detect accounting risks and generate follow-up actions.
+FinGuard AI is a skills-based financial control platform for SMEs. It ingests monthly finance data, detects risk patterns, scores business health, and generates practical management actions founders can execute immediately.
 
-## Project status (what is happening now)
+## Solution Overview
 
-- The app is runnable locally with Node.js and npm.
-- Core monthly review flow is implemented end-to-end:
-  1. Ingest monthly data from Zoho/direct endpoint.
-  2. Analyze anomalies and risk.
-  3. Build a structured report.
-  4. Generate follow-up actions and save files to data/reports.
-- Optional Avalanche notifications are supported but disabled by default.
-- A chat endpoint is available for conversational questions against analysis context.
+Most SMEs do not fail because data is unavailable. They fail because risk signals are hidden inside fragmented accounting records.
 
-## Skills in this project
+FinGuard AI solves this by acting as a virtual financial controller that:
 
-Registered in [skills/manifest.json](skills/manifest.json):
+- pulls monthly accounting data from Zoho/direct APIs
+- translates raw records into risk findings and trend intelligence
+- produces founder-friendly executive summaries
+- outputs trackable follow-up actions with priorities and owners
+- keeps an auditable report trail in JSON, CSV, and text
 
-- financial-controller-core: orchestrates monthly review, scoring, report, and next actions.
-- zoho-fetcher: pulls monthly accounting data and validates required shapes.
-- fraud-and-errors-detector: runs high-signal accounting anomaly rules.
-- followup-orchestrator: turns findings into owner-assigned, due-dated tasks and output files.
+## What This App Delivers
 
-Skill docs:
+- Monthly financial risk review in one workflow
+- Unified visibility across cash flow, revenue, customers, and vendors
+- Early warnings for anomalies and concentration risk
+- Financial health score (0-100) for fast decision-making
+- Action center with concrete next steps and due windows
+- Optional Avalanche integration for notifications and contract deployment workflows
 
-- [skills/financial-controller-core/SKILL.md](skills/financial-controller-core/SKILL.md)
-- [skills/zoho-fetcher/SKILL.md](skills/zoho-fetcher/SKILL.md)
-- [skills/fraud-and-errors-detector/SKILL.md](skills/fraud-and-errors-detector/SKILL.md)
-- [skills/followup-orchestrator/SKILL.md](skills/followup-orchestrator/SKILL.md)
+## Core Features
 
-## Code map
+### 1) Data Ingestion and Validation
 
-- [src/server.js](src/server.js): app bootstrap, static hosting, API mount.
-- [src/routes/api.js](src/routes/api.js): health, profile, monthly-review, and chat endpoints.
-- [src/services/zohoClient.js](src/services/zohoClient.js): data ingestion.
-- [src/services/riskEngine.js](src/services/riskEngine.js): detections and risk scoring.
-- [src/services/reportBuilder.js](src/services/reportBuilder.js): report composition.
-- [src/services/followUpWorkflow.js](src/services/followUpWorkflow.js): action generation and file outputs.
-- [public/index.html](public/index.html): local dashboard UI.
+- Zoho/direct API ingestion with environment-driven configuration
+- OAuth start/callback flow for Zoho account connection
+- Mock data mode for local demos and offline development
+- Ingestion diagnostics for missing or incomplete datasets
 
-## Prerequisites
+### 2) Risk and Anomaly Detection
 
-- Node.js 18+ (recommended).
-- npm 9+ (recommended).
-- Optional: Avalanche CLI, only if ENABLE_AVALANCHE=true.
+- duplicate transaction detection
+- round-number and outlier pattern checks
+- mixed personal/business spending signals
+- unreconciled account and missing-field checks
+- severity-tagged findings for triage
 
-## Local setup
+### 3) Cash Flow Intelligence
 
-1. Go to the app folder.
-   cd /home/topsy/kuzana_b1/ai-financial-controller-skill-app
-2. Create your environment file.
-   cp .env.example .env
-3. Install dependencies.
-   npm install
+- cash runway estimation
+- burn and net cash analysis
+- liquidity pressure indicators
+- cash trajectory warnings
 
-## Run the app
+### 4) Revenue and Concentration Intelligence
 
-Production-like mode:
+- revenue trend and growth direction summary
+- customer concentration analysis
+- vendor dependency analysis
+- top counterparty exposure visibility
 
-npm start
+### 5) Health Scoring and Recommendations
 
-Development mode (auto-reload):
+- weighted financial health scoring
+- consolidated risk posture by month
+- recommendation engine for priority actions
+- founder-friendly executive report generation
 
+### 6) Follow-Up Operations
+
+- action item generation from findings
+- owner assignment and due-day logic
+- export-ready CSV action plans
+- timestamped report artifacts for audit trail
+
+### 7) Conversational and Dashboard Experience
+
+- web dashboard for overview and drill-down pages
+- monthly review trigger from API/UI
+- chat endpoint for context-aware Q&A on review data
+
+### 8) Optional Avalanche Capabilities
+
+- optional notifications integration
+- contract template listing
+- controlled contract deployment endpoint (allowlist + deployment toggle)
+- deployment history tracking
+
+## Skills Implemented
+
+The solution is organized as modular skills under `skills/`:
+
+- financial-controller-core
+- zoho-fetcher
+- fraud-and-errors-detector
+- cashflow-risk-analyzer
+- revenue-intelligence
+- vendor-dependency-detector
+- customer-concentration-detector
+- financial-health-scorer
+- recommendation-engine
+- executive-report-generator
+- followup-orchestrator
+
+## API Surface
+
+Base path: `/api`
+
+- `GET /health`
+- `GET /profile`
+- `POST /profile`
+- `GET /oauth/zoho/start`
+- `GET /oauth/zoho/callback`
+- `POST /monthly-review`
+- `GET /health-score`
+- `GET /cashflow`
+- `GET /revenue`
+- `GET /anomalies`
+- `GET /vendors`
+- `GET /customers`
+- `GET /actions`
+- `POST /executive-report`
+- `POST /chat`
+- `GET /avalanche/contracts/templates`
+- `POST /avalanche/contracts/deploy`
+- `GET /avalanche/contracts/deployments`
+
+## Tech Stack
+
+- Node.js + Express
+- dotenv configuration
+- ethers.js for on-chain interactions
+- static frontend served from `public/`
+
+## Project Structure
+
+- `src/server.js`: app bootstrap and API mount
+- `src/routes/api.js`: API endpoints and orchestration glue
+- `src/services/`: ingestion, risk, reporting, follow-up, and Avalanche services
+- `skills/`: modular capability definitions
+- `public/`: dashboard UI assets
+- `data/reports/`: generated reports, action CSVs, and deployment logs
+
+## Quick Start
+
+1. Install dependencies
+
+```bash
+npm install
+```
+
+2. Create environment file
+
+```bash
+cp .env.example .env
+```
+
+3. Start in development mode
+
+```bash
 npm run dev
+```
 
-Default URL:
+4. Open
 
-http://localhost:8080
+`http://localhost:8080`
 
-## Quick verification
+## Environment Configuration
 
-1. Health check:
-   curl http://localhost:8080/api/health
-2. Profile check:
-   curl http://localhost:8080/api/profile
-3. Monthly review test:
-   curl -X POST http://localhost:8080/api/monthly-review -H "content-type: application/json" -d '{"month":"2026-05","directApiUrl":"https://your-endpoint/monthly-financials","apiKey":"your_optional_token"}'
+Use `.env.example` as your template. Key settings include:
 
-If monthly review succeeds, the response includes report and follow-up objects.
+- runtime: `PORT`, `APP_BASE_URL`, `MOCK_REQUIRED_INTEGRATIONS`
+- Zoho direct/OAuth: `ZOHO_DIRECT_API_URL`, `ZOHO_API_KEY`, `ZOHO_OAUTH_*`
+- business profile: `BUSINESS_NAME`, `USER_NAME`, `BUSINESS_ADDRESS`
+- risk hints and alerts: `BUSINESS_OWNER_KEYWORDS`, `ALERT_EMAILS`
+- Avalanche optional settings: `ENABLE_AVALANCHE`, `AVALANCHE_*`, `ENABLE_AVALANCHE_CONTRACT_DEPLOY`
 
-## Environment variables
+## Output Artifacts
 
-See [.env.example](.env.example) for the full list.
+Monthly reviews generate timestamped files in `data/reports/`:
 
-Important values:
+- `{reportId}-report.json`
+- `{reportId}-report.txt`
+- `{reportId}-actions.csv`
 
-- PORT: server port (default 8080)
-- ZOHO_DIRECT_API_URL: direct/proxy endpoint for monthly financial data
-- ZOHO_API_KEY: optional default API key if not supplied per request
-- BUSINESS_NAME, USER_NAME, BUSINESS_ADDRESS: profile defaults
-- BUSINESS_OWNER_KEYWORDS: comma-separated keywords for mixed-funds detection hints
-- ALERT_EMAILS: comma-separated recipients for follow-up notifications
-- ENABLE_AVALANCHE: set true to enable Avalanche notifications
-- AVALANCHE_CLI_PATH: CLI executable path (default avalanche)
+Contract deployment events are appended to:
 
-## Output artifacts
+- `data/reports/contract-deployments.jsonl`
 
-Generated in [data/reports](data/reports):
+## Typical Flow
 
-- timestamped report JSON files
-- timestamped actions CSV files
-- timestamped report text snapshots (when generated by workflow)
+1. Connect profile and integrations (Zoho, optional wallet)
+2. Trigger monthly review for a target month
+3. Review health score, anomalies, and concentration signals
+4. Export actions and assign owners
+5. Use chat for quick, contextual follow-up questions
 
-These artifacts are useful for audit trail, review, and spreadsheet import.
+## Notes
 
-## Collaboration notes
-
-- Keep skill behavior changes reflected in both implementation and corresponding SKILL.md docs.
-- When adding a new endpoint, update [src/routes/api.js](src/routes/api.js) and this README quick verification section.
-- Avoid committing secrets in .env.
-- If changing report schema, document the output contract in this README and the relevant skill docs.
-
-## Troubleshooting
-
-- npm error ENOENT for package.json:
-  You are likely in the wrong folder. Run commands from /home/topsy/kuzana_b1/ai-financial-controller-skill-app.
-- Port already in use:
-  Change PORT in .env, then restart.
-- Empty or failed monthly review:
-  Verify directApiUrl, API credentials, and payload shape from your data source.
-
-
-Now using the skills creation knowledge.. use it to create the following skills
-
-
-# 1. zoho-fetcher
-
-## Purpose
-
-Retrieve and validate monthly financial data from Zoho Books and normalize it into a consistent structure for downstream analysis.
-
-## Responsibilities
-
-* Fetch accounting records
-* Validate schema integrity
-* Detect missing datasets
-* Standardize field names
-* Generate ingestion diagnostics
-
-## Inputs
-
-{
-"zoho_direct_api_url": "",
-"period_start": "",
-"period_end": ""
-}
-
-## Outputs
-
-{
-"transactions": [],
-"journalEntries": [],
-"reconciliations": [],
-"cashFlow": {},
-"balanceSheet": {},
-"ingestion_diagnostics": []
-}
-
-## Success Criteria
-
-* Data available
-* Structure valid
-* Ready for analysis
-
----
-
-# 2. fraud-and-errors-detector
-
-## Purpose
-
-Detect accounting anomalies and operational red flags that may indicate bookkeeping errors, policy violations, or potential fraud indicators.
-
-## Responsibilities
-
-Detect:
-
-* Duplicate transactions
-* Duplicate invoices
-* Round-number payments
-* Statistical outliers
-* Missing fields
-* Missing references
-* Personal/business expense mixing
-* Unreconciled transactions
-* Unusual transaction timing
-
-## Inputs
-
-{
-"transactions": [],
-"journalEntries": [],
-"owner_keywords": []
-}
-
-## Outputs
-
-{
-"findings": [],
-"risk_score": 0
-}
-
-## Positioning
-
-Indicator engine only.
-
-Never claims fraud occurred.
-
----
-
-# 3. cashflow-risk-analyzer
-
-## Purpose
-
-Assess liquidity health and identify future cash flow risks before they become operational problems.
-
-## Responsibilities
-
-Calculate:
-
-* Cash runway
-* Operating liquidity
-* Cash trend
-* Receivables pressure
-* Payables pressure
-* Payroll coverage
-
-Detect:
-
-* Negative cash trajectory
-* Potential cash shortages
-* Delayed customer collections
-
-## Inputs
-
-{
-"cashFlow": {},
-"transactions": [],
-"accountsReceivable": [],
-"accountsPayable": []
-}
-
-## Outputs
-
-{
-"cash_runway_days": 0,
-"risk_level": "",
-"findings": [],
-"recommendations": []
-}
-
-## Business Value
-
-Answers:
-
-"Will the company run out of cash?"
-
----
-
-# 4. revenue-intelligence
-
-## Purpose
-
-Analyze revenue performance and identify growth or decline patterns affecting business stability.
-
-## Responsibilities
-
-Measure:
-
-* Revenue growth
-* Revenue decline
-* Customer activity
-* Seasonal trends
-* Revenue volatility
-
-Detect:
-
-* Lost customers
-* Shrinking customers
-* Revenue concentration shifts
-
-## Inputs
-
-{
-"invoices": [],
-"payments": [],
-"customers": []
-}
-
-## Outputs
-
-{
-"revenue_summary": {},
-"findings": [],
-"trends": []
-}
-
-## Business Value
-
-Answers:
-
-"Is revenue getting healthier or worse?"
-
----
-
-# 5. vendor-dependency-detector
-
-## Purpose
-
-Identify excessive dependence on suppliers and procurement concentration risks.
-
-## Responsibilities
-
-Analyze:
-
-* Vendor spend distribution
-* Single-vendor exposure
-* Procurement concentration
-
-Detect:
-
-* Supplier dominance
-* Procurement imbalance
-
-## Inputs
-
-{
-"vendors": [],
-"expenses": [],
-"bills": []
-}
-
-## Outputs
-
-{
-"vendor_risk_score": 0,
-"findings": []
-}
-
-## Business Value
-
-Answers:
-
-"What happens if this supplier disappears tomorrow?"
-
----
-
-# 6. customer-concentration-detector
-
-## Purpose
-
-Identify overreliance on specific customers that could threaten future revenue stability.
-
-## Responsibilities
-
-Calculate:
-
-* Revenue contribution by customer
-* Customer dependency ratios
-
-Detect:
-
-* Customer concentration
-* Revenue concentration
-
-## Inputs
-
-{
-"customers": [],
-"invoices": [],
-"payments": []
-}
-
-## Outputs
-
-{
-"customer_risk_score": 0,
-"findings": []
-}
-
-## Business Value
-
-Answers:
-
-"Which customer could cripple the company if they leave?"
-
----
-
-# 7. financial-health-scorer
-
-## Purpose
-
-Convert findings from all analysis skills into a single executive-level financial health assessment.
-
-## Responsibilities
-
-Aggregate:
-
-* Fraud indicators
-* Cash flow risk
-* Revenue stability
-* Vendor dependency
-* Customer dependency
-* Data quality
-
-Generate:
-
-* Weighted score
-* Risk category
-* Executive summary
-
-## Inputs
-
-{
-"fraud_results": {},
-"cashflow_results": {},
-"revenue_results": {},
-"vendor_results": {},
-"customer_results": {}
-}
-
-## Outputs
-
-{
-"overall_score": 0,
-"risk_category": "",
-"summary": ""
-}
-
-## Business Value
-
-Creates the dashboard headline metric.
-
----
-
-# 8. financial-controller-core
-
-## Purpose
-
-Act as the AI Financial Controller by orchestrating all analysis skills, consolidating findings, generating management insights, and producing the final review.
-
-## Responsibilities
-
-1. Fetch data
-2. Validate data
-3. Run analyses
-4. Aggregate findings
-5. Score business health
-6. Generate report
-7. Trigger follow-up actions
-
-## Inputs
-
-{
-"business_name": "",
-"business_address": "",
-"alert_recipients": []
-}
-
-## Outputs
-
-{
-"overall_risk": "",
-"financial_health_score": 0,
-"summary": "",
-"findings": [],
-"recommendations": [],
-"next_actions": []
-}
-
-## Positioning
-
-This is the virtual financial controller.
-
-Not an auditor.
-Not an accountant.
-Not a CFO.
-
-A controller.
-
----
-
-# 9. followup-orchestrator
-
-## Purpose
-
-Transform detected risks into trackable actions that business owners can execute.
-
-## Responsibilities
-
-Generate:
-
-* Tasks
-* Priorities
-* Due dates
-* Owners
-
-Export:
-
-* JSON
-* CSV
-* Notification payloads
-
-## Inputs
-
-{
-"findings": [],
-"risk_level": ""
-}
-
-## Outputs
-
-{
-"tasks": [],
-"csv_export": "",
-"notifications": []
-}
-
----
-
-# 10. recommendation-engine
-
-## Purpose
-
-Convert findings into specific management actions.
-
-## Responsibilities
-
-Generate actionable recommendations from:
-
-* Revenue decline
-* Cash flow risks
-* Vendor risks
-* Customer concentration
-* Fraud indicators
-* Data quality issues
-
-## Example Output
-
-Revenue declining.
-
-Recommended Actions:
-
-* Contact Customer ABC within 48 hours.
-* Review contracts generating less than 10% margin.
-* Accelerate collection of invoices older than 30 days.
-
-## Inputs
-
-{
-"findings": [],
-"risk_scores": {}
-}
-
-## Outputs
-
-{
-"recommendations": []
-}
-
----
-
-# 11. executive-report-generator
-
-## Purpose
-
-Convert technical findings into founder-friendly language that can be understood without accounting expertise.
-
-## Responsibilities
-
-Translate:
-
-* Financial metrics
-* Risk scores
-* Anomaly findings
-* Trend analysis
-
-Into:
-
-* Plain-language summaries
-* Executive insights
-* Priority actions
-
-## Example
-
-Technical Finding:
-Customer concentration ratio = 58%
-
-Executive Explanation:
-More than half of your revenue comes from a single customer. If this customer leaves, the business could experience a significant cash flow shock.
-
-## Inputs
-
-{
-"all_findings": [],
-"risk_scores": {},
-"recommendations": []
-}
-
-## Outputs
-
-{
-"executive_summary": "",
-"management_report": "",
-"priority_actions": []
-}
-
+- This platform provides decision support and risk indicators, not legal or audit conclusions.
+- Keep secrets in `.env` and never commit live credentials.

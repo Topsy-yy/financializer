@@ -39,7 +39,7 @@ function toPlainTextReport(report, actions) {
   const checklist = Array.isArray(report.checklist) ? report.checklist : [];
 
   const header = [
-    "AI Financial Controller - Monthly Analysis",
+    "FinGuard AI - Monthly Analysis",
     `Business: ${report.company?.name || "Unknown"}`,
     `Address: ${report.company?.address || "Not provided"}`,
     `Period: ${report.period || "Current month"}`,

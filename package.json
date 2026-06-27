@@ -1,7 +1,7 @@
 {
   "name": "ai-financial-controller-skill-app",
   "version": "0.1.0",
-  "description": "Skills-based AI Financial Controller for Kenyan SMEs",
+  "description": "Skills-based FinGuard AI for Kenyan SMEs",
   "main": "src/server.js",
   "type": "commonjs",
   "scripts": {
@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "dotenv": "^16.4.5",
+    "ethers": "^6.17.0",
     "express": "^4.19.2"
   },
   "devDependencies": {

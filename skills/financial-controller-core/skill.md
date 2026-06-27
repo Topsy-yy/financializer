@@ -1,6 +1,6 @@
 ---
 name: financial-controller-core
-description: Act as the AI Financial Controller by orchestrating all analysis skills, consolidating findings, generating management insights, and producing the final review. This is the virtual financial controller — not an auditor, not an accountant, not a CFO.
+description: Act as the FinGuard AI by orchestrating all analysis skills, consolidating findings, generating management insights, and producing the final review. This is the virtual financial controller — not an auditor, not an accountant, not a CFO.
 dependencies: node>=18
 ---
 
@@ -8,7 +8,7 @@ dependencies: node>=18
 
 ## Purpose
 
-Act as the AI Financial Controller by orchestrating all analysis skills, consolidating findings, generating management insights, and producing the final review.
+Act as the FinGuard AI by orchestrating all analysis skills, consolidating findings, generating management insights, and producing the final review.
 
 ## Positioning
 
@@ -50,7 +50,7 @@ The dashboard navigation and skill ownership should follow this mapping:
 | Customers | customer-concentration-detector, revenue-intelligence |
 | Action Center | followup-orchestrator, recommendation-engine |
 | Executive Reports | executive-report-generator, financial-controller-core |
-| AI Controller | financial-controller-core, executive-report-generator, recommendation-engine |
+| FinGuard AI | financial-controller-core, executive-report-generator, recommendation-engine |
 | Settings | zoho-fetcher, financial-controller-core |
 
 `Audit Findings` is intentionally replaced by **Risk & Anomalies** for founder-friendly language.
@@ -143,9 +143,9 @@ Step 7: followup-orchestrator (create tasks, export reports)
 }
 ```
 
-## AI Controller Summary
+## FinGuard AI Summary
 
-The most critical output is the **AI Controller Summary** panel at the center of the dashboard. It answers three questions:
+The most critical output is the **FinGuard AI Summary** panel at the center of the dashboard. It answers three questions:
 
 ### 1. What is wrong?
 Headline + severity classification from the health scorer.

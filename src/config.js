@@ -19,9 +19,18 @@ function parseCsvEnv(value) {
 
 module.exports = {
   port: Number(process.env.PORT || 8080),
+  appBaseUrl: process.env.APP_BASE_URL || `http://localhost:${process.env.PORT || 8080}`,
   mockRequiredIntegrations: String(process.env.MOCK_REQUIRED_INTEGRATIONS || "true") === "true",
   zohoDirectApiUrl: process.env.ZOHO_DIRECT_API_URL || "",
   zohoApiKey: process.env.ZOHO_API_KEY || "",
+  zohoOauthClientId: process.env.ZOHO_OAUTH_CLIENT_ID || "",
+  zohoOauthClientSecret: process.env.ZOHO_OAUTH_CLIENT_SECRET || "",
+  zohoOauthAuthUrl: process.env.ZOHO_OAUTH_AUTH_URL || "https://accounts.zoho.com/oauth/v2/auth",
+  zohoOauthTokenUrl: process.env.ZOHO_OAUTH_TOKEN_URL || "https://accounts.zoho.com/oauth/v2/token",
+  zohoOauthScope: process.env.ZOHO_OAUTH_SCOPE || "ZohoBooks.fullaccess.all",
+  zohoOauthRedirectUri:
+    process.env.ZOHO_OAUTH_REDIRECT_URI ||
+    `${process.env.APP_BASE_URL || `http://localhost:${process.env.PORT || 8080}`}/api/oauth/zoho/callback`,
   coreWalletApiUrl: process.env.CORE_WALLET_API_URL || "",
   coreWalletApiKey: process.env.CORE_WALLET_API_KEY || "",
   coreWalletAccountId: process.env.CORE_WALLET_ACCOUNT_ID || "",
@@ -34,5 +43,10 @@ module.exports = {
   alertEmails: parseCsvEnv(process.env.ALERT_EMAILS),
   avalancheCliPath: process.env.AVALANCHE_CLI_PATH || "avalanche",
   enableAvalanche: String(process.env.ENABLE_AVALANCHE || "false") === "true",
+  avalancheCChainRpcUrl: process.env.AVALANCHE_CCHAIN_RPC_URL || "https://api.avax-test.network/ext/bc/C/rpc",
+  avalancheCChainChainId: Number(process.env.AVALANCHE_CCHAIN_CHAIN_ID || 43113),
+  avalancheDeployPrivateKey: process.env.AVALANCHE_DEPLOY_PRIVATE_KEY || "",
+  avalancheContractAllowlist: parseCsvEnv(process.env.AVALANCHE_CONTRACT_ALLOWLIST),
+  enableAvalancheContractDeploy: String(process.env.ENABLE_AVALANCHE_CONTRACT_DEPLOY || "false") === "true",
   reportsDir
 };

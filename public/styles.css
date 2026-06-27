@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════
-   AI Financial Controller — Premium Dark Theme
+   FinGuard AI — Premium Dark Theme
    ═══════════════════════════════════════════════════════════════ */
 
 /* ── CSS Variables ───────────────────────────────────────────── */
@@ -748,6 +748,11 @@ input, textarea, select { font-family: inherit; }
   border-bottom: 1px solid var(--border-color);
 }
 
+.settings-helper {
+  margin-bottom: 0.8rem;
+  line-height: 1.5;
+}
+
 .settings-group {
   margin-bottom: 1rem;
 }
@@ -783,6 +788,42 @@ input, textarea, select { font-family: inherit; }
 .settings-input:read-only {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+.settings-textarea {
+  max-width: 100%;
+  min-height: 120px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.78rem;
+}
+
+.settings-inline-check label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+
+.contract-deploy-result {
+  margin-top: 0.9rem;
+}
+
+.contract-deploy-history {
+  margin-top: 0.6rem;
+}
+
+.json-block {
+  margin-top: 0.5rem;
+  padding: 0.8rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-color);
+  background: rgba(0, 0, 0, 0.22);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.78rem;
+  line-height: 1.45;
 }
 
 /* ── Report Cards ────────────────────────────────────────────── */
@@ -1051,6 +1092,225 @@ input, textarea, select { font-family: inherit; }
   flex: 1;
 }
 
+/* ── Onboarding Wizard ──────────────────────────────────────── */
+.onboarding-wizard {
+  max-width: 480px;
+  overflow: hidden;
+}
+
+/* Progress Indicator */
+.onboarding-progress {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  margin-bottom: 2rem;
+  padding-bottom: 1.5rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.progress-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+  opacity: 0.4;
+  transition: opacity 0.4s ease, transform 0.3s ease;
+}
+
+.progress-step.active {
+  opacity: 1;
+}
+
+.progress-step.completed {
+  opacity: 0.8;
+}
+
+.step-number {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 0.8rem;
+  font-weight: 700;
+  border: 2px solid var(--border-color);
+  color: var(--text-muted);
+  transition: all 0.4s ease;
+}
+
+.progress-step.active .step-number {
+  border-color: var(--color-brand);
+  color: var(--color-brand);
+  box-shadow: 0 0 12px rgba(96, 165, 250, 0.3);
+  background: rgba(96, 165, 250, 0.1);
+}
+
+.progress-step.completed .step-number {
+  border-color: var(--color-emerald);
+  color: var(--color-emerald);
+  background: rgba(16, 185, 129, 0.1);
+}
+
+.step-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.progress-step.active .step-label {
+  color: var(--color-brand);
+}
+
+.progress-step.completed .step-label {
+  color: var(--color-emerald);
+}
+
+.progress-connector {
+  width: 60px;
+  height: 2px;
+  background: var(--border-color);
+  margin: 0 1rem;
+  margin-bottom: 1.2rem;
+  position: relative;
+  overflow: hidden;
+}
+
+.progress-connector::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: 0%;
+  background: var(--color-brand);
+  transition: width 0.6s ease;
+}
+
+.progress-connector.filled::after {
+  width: 100%;
+  background: var(--color-emerald);
+}
+
+/* Steps */
+.onboard-step {
+  display: none;
+  animation: fadeIn 0.4s ease;
+}
+
+.onboard-step.active {
+  display: block;
+}
+
+.step-header {
+  text-align: center;
+  margin-bottom: 1.75rem;
+}
+
+.step-icon {
+  font-size: 2.5rem;
+  display: block;
+  margin-bottom: 0.75rem;
+}
+
+.step-header h2 {
+  margin-bottom: 0.35rem;
+  font-size: 1.3rem;
+}
+
+.step-header p {
+  max-width: 320px;
+  margin: 0 auto;
+  line-height: 1.5;
+}
+
+/* Integration Divider */
+.integration-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0.75rem 0 1.25rem 0;
+}
+
+.divider-line {
+  flex: 1;
+  height: 1px;
+  background: var(--border-color);
+}
+
+.divider-text {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* Full-width buttons */
+.btn-full {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.85rem 1.5rem;
+  font-size: 0.95rem;
+}
+
+.btn-icon {
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+/* Wallet Info Card */
+.wallet-info {
+  padding: 1rem 1.25rem;
+  margin-bottom: 1.25rem;
+  background: rgba(16, 185, 129, 0.05);
+  border-color: rgba(16, 185, 129, 0.15);
+}
+
+.wallet-info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.4rem 0;
+}
+
+.wallet-info-row + .wallet-info-row {
+  border-top: 1px solid var(--border-color);
+}
+
+/* Alternative action area */
+.onboard-alt {
+  text-align: center;
+  margin-top: 1.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border-color);
+}
+
+.onboard-alt p {
+  margin-bottom: 0.75rem;
+}
+
+/* Ghost button (skip) */
+.btn-ghost {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 0.5rem 1rem;
+  transition: color 0.2s ease;
+}
+
+.btn-ghost:hover {
+  color: var(--color-brand);
+}
 /* ── Profile Popover ─────────────────────────────────────────── */
 .profile-popover {
   position: absolute;

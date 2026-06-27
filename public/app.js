@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════
-   AI Financial Controller — Application Logic
+   FinGuard AI — Application Logic
    Premium Dark Dashboard SPA
    ═══════════════════════════════════════════════════════════════ */
 
@@ -11,7 +11,15 @@ var $analysisMonth  = document.getElementById('analysis-month');
 var $navLinks       = document.getElementById('nav-links');
 var $signupOverlay  = document.getElementById('signup-overlay');
 var $signupForm     = document.getElementById('signup-form');
+var $btnZohoOauth   = document.getElementById('btn-zoho-oauth');
 var $btnDemo        = document.getElementById('btn-demo-mode');
+var $onboardStep1   = document.getElementById('onboard-step-1');
+var $onboardStep2   = document.getElementById('onboard-step-2');
+var $progStep1      = document.getElementById('prog-step-1');
+var $progStep2      = document.getElementById('prog-step-2');
+var $progressConn   = document.querySelector('.progress-connector');
+var $btnConnWallet  = document.getElementById('btn-connect-wallet');
+var $btnSkipWallet  = document.getElementById('btn-skip-wallet');
 var $themeToggle    = document.getElementById('theme-toggle');
 var $profileToggle  = document.getElementById('profile-toggle');
 var $profilePopover = document.getElementById('profile-popover');
@@ -112,6 +120,13 @@ function formatPercent(value) {
   return Number(value).toFixed(1) + '%';
 }
 
+function maskWalletAddress(address) {
+  if (!address) return 'Not set';
+  var text = String(address);
+  if (text.length <= 10) return '••••••••';
+  return text.slice(0, 6) + '••••••••' + text.slice(-4);
+}
+
 function getMonthLabel(monthStr) {
   if (!monthStr) return '—';
   var parts = monthStr.split('-');
@@ -196,7 +211,7 @@ async function loadProfile() {
         '<div class="profile-field"><div class="profile-field-label">Name</div><div class="profile-field-value">' + escapeHtml(p.name || appState.userName) + '</div></div>' +
         '<div class="profile-field"><div class="profile-field-label">Company</div><div class="profile-field-value">' + escapeHtml(p.business_name || appState.businessName) + '</div></div>' +
         '<div class="profile-field"><div class="profile-field-label">Zoho</div><div class="profile-field-value">' + (p.zoho_connected ? '✅ Connected' : '❌ Not connected') + '</div></div>' +
-        '<div class="profile-field"><div class="profile-field-label">Wallet</div><div class="profile-field-value text-sm">' + escapeHtml(p.wallet_address || 'Not set') + '</div></div>' +
+        '<div class="profile-field"><div class="profile-field-label">Wallet</div><div class="profile-field-value text-sm">' + escapeHtml(maskWalletAddress(p.wallet_address)) + '</div></div>' +
         '<div class="profile-field"><div class="profile-field-label">AI Provider</div><div class="profile-field-value">' + escapeHtml(p.ai_provider || appState.aiProvider || 'openai') + '</div></div>' +
         '<div class="profile-field"><div class="profile-field-label">AI Assistant</div><div class="profile-field-value">' + escapeHtml(p.ai_assistant || appState.aiAssistant || 'controller-core') + '</div></div>';
 
@@ -220,6 +235,8 @@ document.addEventListener('click', function(e) {
 
 /* ── 6. Onboarding ───────────────────────────────────────────── */
 async function checkOnboarding() {
+  $signupOverlay.classList.remove('hidden');
+
   try {
     var res = await fetch('/api/profile');
     var data = await res.json();
@@ -227,64 +244,157 @@ async function checkOnboarding() {
       appState.userName = data.profile.name || appState.userName;
       appState.businessName = data.profile.business_name || appState.businessName;
       appState.zohoApiKey = data.profile.zoho_api_key || '';
+      appState.zohoOrgId = data.profile.zoho_org_id || '';
       appState.walletAddress = data.profile.wallet_address || '';
       appState.aiProvider = data.profile.ai_provider || appState.aiProvider;
       appState.aiAssistant = data.profile.ai_assistant || appState.aiAssistant;
       appState.aiApiKey = data.profile.ai_api_key || '';
+
+      var nameInput = document.getElementById('input-name');
+      var companyInput = document.getElementById('input-company');
+      var zohoOrgInput = document.getElementById('input-zoho-org');
+      var zohoInput = document.getElementById('input-zoho');
+      var walletInput = document.getElementById('input-wallet');
+
+      if (nameInput) nameInput.value = appState.userName || '';
+      if (companyInput) companyInput.value = appState.businessName || '';
+      if (zohoOrgInput) zohoOrgInput.value = appState.zohoOrgId || '';
+      if (zohoInput) zohoInput.value = appState.zohoApiKey || '';
+      if (walletInput) walletInput.value = appState.walletAddress || '';
+
       $companyContext.textContent = 'Company: ' + appState.businessName;
-      $signupOverlay.classList.add('hidden');
-      return;
     }
   } catch (e) { /* continue to show signup */ }
-  $signupOverlay.classList.remove('hidden');
 }
 
+/* ── Wizard: Step Navigation Helper ──────────────────────────── */
+function goToStep2() {
+  $onboardStep1.classList.remove('active');
+  $onboardStep2.classList.add('active');
+  $progStep1.classList.remove('active');
+  $progStep1.classList.add('completed');
+  $progStep1.querySelector('.step-number').textContent = '✓';
+  $progStep2.classList.add('active');
+  if ($progressConn) $progressConn.classList.add('filled');
+}
+
+function completeOnboarding(walletAddr) {
+  appState.walletAddress = walletAddr || '';
+  $companyContext.textContent = 'Company: ' + appState.businessName;
+  $signupOverlay.classList.add('hidden');
+
+  // Persist to backend
+  fetch('/api/profile', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: appState.userName,
+      business_name: appState.businessName,
+      zoho_api_key: appState.zohoApiKey,
+      zoho_org_id: appState.zohoOrgId || '',
+      wallet_address: appState.walletAddress
+    })
+  }).catch(function() { /* silent */ });
+
+  showToast('Welcome, ' + appState.userName + '! Your account is ready.', 'success');
+}
+
+/* ── Step 1: Continue with Zoho Books ────────────────────────── */
 $signupForm.addEventListener('submit', async function(e) {
   e.preventDefault();
   var name = document.getElementById('input-name').value.trim();
   var company = document.getElementById('input-company').value.trim();
+  var zohoOrg = document.getElementById('input-zoho-org').value.trim();
   var zoho = document.getElementById('input-zoho').value.trim();
-  var wallet = document.getElementById('input-wallet').value.trim();
 
   if (!name || !company) {
     showToast('Name and company are required.', 'warning');
     return;
   }
 
-  try {
-    var res = await fetch('/api/profile', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: name,
-        business_name: company,
-        zoho_api_key: zoho,
-        wallet_address: wallet
-      })
-    });
-    var data = await res.json();
-    if (data.ok) {
-      appState.userName = name;
-      appState.businessName = company;
-      appState.zohoApiKey = zoho;
-      appState.walletAddress = wallet;
-      $companyContext.textContent = 'Company: ' + company;
-      $signupOverlay.classList.add('hidden');
-      showToast('Welcome, ' + name + '! Your account is ready.', 'success');
-    } else {
-      showToast('Setup failed: ' + (data.error || 'Unknown error'), 'error');
-    }
-  } catch (err) {
-    showToast('Connection error. Please try again.', 'error');
-  }
+  // Store Step 1 data
+  appState.userName = name;
+  appState.businessName = company;
+  appState.zohoApiKey = zoho;
+  appState.zohoOrgId = zohoOrg;
+
+  showToast('Zoho Books connected! Now link your wallet.', 'success');
+  goToStep2();
 });
 
+if ($btnZohoOauth) {
+  $btnZohoOauth.addEventListener('click', function() {
+    var name = document.getElementById('input-name').value.trim();
+    var company = document.getElementById('input-company').value.trim();
+    var zohoOrg = document.getElementById('input-zoho-org').value.trim();
+
+    if (!name || !company) {
+      showToast('Name and company are required before OAuth.', 'warning');
+      return;
+    }
+
+    appState.userName = name;
+    appState.businessName = company;
+    appState.zohoOrgId = zohoOrg;
+
+    var oauthUrl = '/api/oauth/zoho/start?name=' + encodeURIComponent(name)
+      + '&business_name=' + encodeURIComponent(company)
+      + '&zoho_org_id=' + encodeURIComponent(zohoOrg || '');
+
+    window.location.href = oauthUrl;
+  });
+}
+
+function handleOauthResultFromUrl() {
+  var params = new URLSearchParams(window.location.search);
+  var oauth = params.get('oauth');
+  if (!oauth) return;
+
+  if (oauth === 'success') {
+    showToast('Zoho OAuth connected successfully.', 'success');
+    goToStep2();
+  } else if (oauth === 'not_configured') {
+    showToast('Zoho OAuth is not configured on the server.', 'warning');
+  } else {
+    var reason = params.get('reason') || 'unknown_error';
+    showToast('Zoho OAuth failed: ' + reason, 'error');
+  }
+
+  var newUrl = window.location.pathname + window.location.hash;
+  history.replaceState(null, '', newUrl);
+}
+
+/* ── Step 2: Connect Core Wallet ─────────────────────────────── */
+$btnConnWallet.addEventListener('click', function() {
+  var wallet = document.getElementById('input-wallet').value.trim();
+  if (!wallet) {
+    showToast('Please enter a wallet address or skip.', 'warning');
+    return;
+  }
+  if (!wallet.startsWith('0x') || wallet.length < 10) {
+    showToast('Enter a valid Avalanche C-Chain address (0x…).', 'warning');
+    return;
+  }
+  showToast('Core Wallet connected!', 'success');
+  completeOnboarding(wallet);
+});
+
+$btnSkipWallet.addEventListener('click', function() {
+  completeOnboarding('');
+  showToast('Wallet skipped — you can add it later in Settings.', 'info');
+});
+
+/* ── Demo Mode: Skip everything ──────────────────────────────── */
 $btnDemo.addEventListener('click', function() {
+  var demoWallet = '0x742d35Cc6634C0532925a3b844Bc454e4438f44e';
   appState.userName = 'Aisha';
   appState.businessName = 'ABC Traders Ltd';
-  $companyContext.textContent = 'Company: ' + appState.businessName;
-  $signupOverlay.classList.add('hidden');
-  showToast('Demo Mode active — using sample data.', 'info');
+  appState.zohoApiKey = 'demo_zoho_connected';
+  appState.zohoOrgId = 'demo-org-001';
+  appState.walletAddress = demoWallet;
+
+  completeOnboarding(demoWallet);
+  showToast('Demo Mode active — Zoho and wallet connected with sample data.', 'info');
 });
 
 /* ── 7. Router ───────────────────────────────────────────────── */
@@ -298,7 +408,8 @@ var routes = {
   'customers':        { title: 'Customers',             render: renderCustomers },
   'actions':          { title: 'Action Center',         render: renderActionCenter },
   'reports':          { title: 'Executive Reports',     render: renderExecutiveReports },
-  'ai-controller':    { title: 'AI Controller',         render: renderAIController },
+  'contracts':        { title: 'Contracts',             render: renderContracts },
+  'ai-controller':    { title: 'FinGuard AI',         render: renderAIController },
   'settings':         { title: 'Settings',              render: renderSettings }
 };
 
@@ -449,7 +560,7 @@ function renderOverview() {
   /* Critical Findings + AI Summary */
   html += '<div class="grid-2col">';
   html += '<div class="glass-card"><div class="card-title">Critical Findings</div>' + renderFindingsList(criticalFindings) + '</div>';
-  html += '<div class="glass-card glow-border"><div class="card-title">🤖 AI Controller Summary</div><p class="text-sm" style="line-height:1.7;white-space:pre-wrap;">' + escapeHtml(typeof ai === 'string' ? ai : JSON.stringify(ai, null, 2)) + '</p></div>';
+  html += '<div class="glass-card glow-border"><div class="card-title">🤖 FinGuard AI Summary</div><p class="text-sm" style="line-height:1.7;white-space:pre-wrap;">' + escapeHtml(typeof ai === 'string' ? ai : JSON.stringify(ai, null, 2)) + '</p></div>';
   html += '</div>';
 
   /* Cash Flow Forecast */
@@ -942,7 +1053,7 @@ async function generateReport(reportType) {
   }
 }
 
-/* ── AI Controller (Chat) ────────────────────────────────────── */
+/* ── FinGuard AI (Chat) ────────────────────────────────────── */
 function renderAIController() {
   var suggestedQuestions = [
     'Why is profit dropping?',
@@ -968,7 +1079,7 @@ function renderAIController() {
   /* Chat feed */
   html += '<div class="chat-feed-full" id="chat-feed">';
   if (appState.chatHistory.length === 0) {
-    html += '<div class="empty-state" style="flex:1"><div class="empty-state-icon">🤖</div><div class="empty-state-title">AI Financial Controller</div><div class="empty-state-text">Ask me anything about your finances. I have full context from your latest analysis.</div></div>';
+    html += '<div class="empty-state" style="flex:1"><div class="empty-state-icon">🤖</div><div class="empty-state-title">FinGuard AI</div><div class="empty-state-text">Ask me anything about your finances. I have full context from your latest analysis.</div></div>';
   } else {
     appState.chatHistory.forEach(function(msg) {
       html += renderChatMessage(msg.role, msg.content);
@@ -978,7 +1089,7 @@ function renderAIController() {
 
   /* Input bar */
   html += '<div class="chat-input-wrapper">';
-  html += '<input type="text" class="chat-input" id="chat-input" placeholder="Ask the AI Controller…" onkeydown="if(event.key===\'Enter\')sendChat()" />';
+  html += '<input type="text" class="chat-input" id="chat-input" placeholder="Ask the FinGuard AI…" onkeydown="if(event.key===\'Enter\')sendChat()" />';
   html += '<button class="btn-primary" onclick="sendChat()">Send</button>';
   html += '</div>';
 
@@ -1065,6 +1176,46 @@ async function sendChat() {
 }
 
 /* ── Settings ────────────────────────────────────────────────── */
+function renderContracts() {
+  var html = '<div class="glass-card" style="max-width:860px">';
+  html += '<div class="settings-section">';
+  html += '<h3>Avalanche Contract Deploy</h3>';
+  html += '<div class="settings-helper text-sm text-muted">Choose a contract template and deploy. No ABI or bytecode required in standard mode.</div>';
+  html += '<div class="settings-group"><label class="settings-label">Receiver Address</label><input type="text" class="settings-input" id="settings-contract-receiver" placeholder="0x..." /></div>';
+  html += '<div class="settings-group"><label class="settings-label">Contract Template</label><select class="settings-input" id="settings-contract-template"></select></div>';
+  html += '<div class="settings-group"><label class="settings-label">Deployment Name (optional)</label><input type="text" class="settings-input" id="settings-contract-name" placeholder="Leave blank to use template default" /></div>';
+  html += '<div class="settings-group"><label class="settings-label">Constructor Args (optional JSON Array)</label><input type="text" class="settings-input" id="settings-contract-args" placeholder="[]" /></div>';
+  html += '<div class="settings-group settings-inline-check"><label><input type="checkbox" id="settings-contract-dryrun" checked /> Dry Run (recommended)</label></div>';
+  html += '<div class="settings-group settings-inline-check"><label><input type="checkbox" id="settings-contract-advanced" /> Advanced mode (manual ABI/bytecode)</label></div>';
+  html += '<div id="settings-contract-advanced-panel" class="hidden">';
+  html += '<div class="settings-group"><label class="settings-label">ABI (JSON Array)</label><textarea class="settings-input settings-textarea" id="settings-contract-abi" placeholder="[{\"type\":\"constructor\",\"inputs\":[]}]"></textarea></div>';
+  html += '<div class="settings-group"><label class="settings-label">Bytecode</label><textarea class="settings-input settings-textarea" id="settings-contract-bytecode" placeholder="0x..."></textarea></div>';
+  html += '</div>';
+  html += '<div style="display:flex;gap:0.75rem;flex-wrap:wrap;">';
+  html += '<button class="btn-primary" onclick="deployContractFromSettings()">Deploy Contract</button>';
+  html += '<button class="btn-small" onclick="loadContractDeploymentHistory()">Refresh Deployment History</button>';
+  html += '</div>';
+  html += '<div id="contract-deploy-result" class="contract-deploy-result"></div>';
+  html += '<div class="card-title" style="margin-top:1rem;">Recent Contract Deployments</div>';
+  html += '<div id="contract-deploy-history" class="contract-deploy-history text-sm text-muted">Loading deployment history…</div>';
+  html += '</div>';
+  html += '</div>';
+
+  $pageContent.innerHTML = html;
+  setTimeout(loadContractTemplates, 0);
+  setTimeout(loadContractDeploymentHistory, 0);
+
+  var advancedToggle = document.getElementById('settings-contract-advanced');
+  if (advancedToggle) {
+    advancedToggle.addEventListener('change', function() {
+      var panel = document.getElementById('settings-contract-advanced-panel');
+      if (!panel) return;
+      if (advancedToggle.checked) panel.classList.remove('hidden');
+      else panel.classList.add('hidden');
+    });
+  }
+}
+
 function renderSettings() {
   var html = '<div class="glass-card" style="max-width:640px">';
 
@@ -1105,7 +1256,7 @@ function renderSettings() {
   /* Avalanche Settings */
   html += '<div class="settings-section">';
   html += '<h3>Avalanche Settings</h3>';
-  html += '<div class="settings-group"><label class="settings-label">Wallet Address</label><input type="text" class="settings-input" id="settings-wallet" value="' + escapeHtml(appState.walletAddress) + '" placeholder="0x..." /></div>';
+  html += '<div class="settings-group"><label class="settings-label">Wallet Address</label><input type="password" class="settings-input" id="settings-wallet" value="' + escapeHtml(appState.walletAddress) + '" placeholder="0x..." autocomplete="off" spellcheck="false" /></div>';
   html += '<div class="settings-group"><label class="settings-label">Network</label><input type="text" class="settings-input" value="Avalanche C-Chain" readonly /></div>';
   html += '</div>';
 
@@ -1137,6 +1288,162 @@ function renderSettings() {
   html += '</div>';
 
   $pageContent.innerHTML = html;
+}
+
+function safeParseJson(input, fallback) {
+  if (!input || !String(input).trim()) return fallback;
+  try {
+    return JSON.parse(input);
+  } catch {
+    return null;
+  }
+}
+
+function prettyJson(data) {
+  return escapeHtml(JSON.stringify(data, null, 2));
+}
+
+async function deployContractFromSettings() {
+  var contractName = document.getElementById('settings-contract-name').value.trim();
+  var receiverAddress = document.getElementById('settings-contract-receiver').value.trim();
+  var templateId = document.getElementById('settings-contract-template').value;
+  var advancedMode = document.getElementById('settings-contract-advanced').checked;
+  var abiInput = document.getElementById('settings-contract-abi').value;
+  var bytecode = document.getElementById('settings-contract-bytecode').value.trim();
+  var constructorArgsInput = document.getElementById('settings-contract-args').value;
+  var dryRun = document.getElementById('settings-contract-dryrun').checked;
+  var resultEl = document.getElementById('contract-deploy-result');
+
+  var constructorArgs = safeParseJson(constructorArgsInput, []);
+
+  if (!Array.isArray(constructorArgs)) {
+    showToast('Constructor args must be a valid JSON array.', 'warning');
+    return;
+  }
+
+  var payload = {
+    templateId: templateId || null,
+    receiverAddress: receiverAddress,
+    contractName: contractName || undefined,
+    constructorArgs: constructorArgs,
+    dryRun: dryRun
+  };
+
+  if (!receiverAddress) {
+    showToast('Receiver address is required.', 'warning');
+    return;
+  }
+
+  if (!/^0x[a-fA-F0-9]{40}$/.test(receiverAddress)) {
+    showToast('Receiver address must be a valid 0x address.', 'warning');
+    return;
+  }
+
+  if (!advancedMode && !payload.templateId) {
+    showToast('Please select a contract template.', 'warning');
+    return;
+  }
+
+  if (advancedMode) {
+    var abi = safeParseJson(abiInput, []);
+    if (!Array.isArray(abi)) {
+      showToast('ABI must be a valid JSON array.', 'warning');
+      return;
+    }
+    if (!bytecode) {
+      showToast('Bytecode is required in advanced mode.', 'warning');
+      return;
+    }
+    payload.abi = abi;
+    payload.bytecode = bytecode;
+  }
+
+  resultEl.innerHTML = '<div class="loading-shimmer" style="height:90px;margin-top:0.75rem"></div>';
+
+  try {
+    var res = await fetch('/api/avalanche/contracts/deploy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    var data = await res.json();
+
+    if (data.ok) {
+      showToast(dryRun ? 'Dry run completed.' : 'Deployment submitted.', 'success');
+      resultEl.innerHTML = '<pre class="json-block">' + prettyJson(data) + '</pre>';
+    } else {
+      showToast('Deploy failed: ' + (data.message || data.error || 'Unknown error'), 'error');
+      resultEl.innerHTML = '<pre class="json-block">' + prettyJson(data) + '</pre>';
+    }
+    loadContractDeploymentHistory();
+  } catch (e) {
+    showToast('Deployment request failed.', 'error');
+    resultEl.innerHTML = '<p class="text-red text-sm" style="margin-top:0.75rem;">Connection error.</p>';
+  }
+}
+
+async function loadContractTemplates() {
+  var select = document.getElementById('settings-contract-template');
+  if (!select) return;
+
+  select.innerHTML = '<option value="">Loading templates...</option>';
+  try {
+    var res = await fetch('/api/avalanche/contracts/templates');
+    var data = await res.json();
+    if (!data.ok || !Array.isArray(data.items) || data.items.length === 0) {
+      select.innerHTML = '<option value="">No templates available</option>';
+      return;
+    }
+
+    select.innerHTML = '<option value="">Select template</option>';
+    data.items.forEach(function(item) {
+      var option = document.createElement('option');
+      option.value = item.id;
+      option.textContent = item.label + ' (' + item.contract_name + ')';
+      select.appendChild(option);
+    });
+  } catch (e) {
+    select.innerHTML = '<option value="">Unable to load templates</option>';
+  }
+}
+
+async function loadContractDeploymentHistory() {
+  var historyEl = document.getElementById('contract-deploy-history');
+  if (!historyEl) return;
+
+  historyEl.innerHTML = '<div class="loading-shimmer" style="height:90px"></div>';
+  try {
+    var res = await fetch('/api/avalanche/contracts/deployments?limit=12');
+    var data = await res.json();
+    if (!data.ok || !Array.isArray(data.items)) {
+      historyEl.innerHTML = '<p class="text-muted text-sm">Unable to load deployment history.</p>';
+      return;
+    }
+
+    if (data.items.length === 0) {
+      historyEl.innerHTML = '<p class="text-muted text-sm">No deployments recorded yet.</p>';
+      return;
+    }
+
+    var html = '<table class="data-table"><thead><tr><th>When</th><th>Contract</th><th>Receiver</th><th>Mode</th><th>Status</th><th>Tx / Error</th></tr></thead><tbody>';
+    data.items.forEach(function(item) {
+      var statusClass = item.ok ? 'badge-low' : 'badge-high';
+      var statusText = item.ok ? 'ok' : 'failed';
+      var txOrErr = item.tx_hash || item.error || '—';
+      html += '<tr>';
+      html += '<td class="text-xs text-muted">' + escapeHtml(item.created_at || '—') + '</td>';
+      html += '<td>' + escapeHtml(item.contract_name || '—') + '</td>';
+      html += '<td class="text-xs" style="max-width:220px;overflow-wrap:anywhere;">' + escapeHtml(item.receiver_address || '—') + '</td>';
+      html += '<td>' + escapeHtml(item.mode || '—') + '</td>';
+      html += '<td><span class="' + statusClass + '">' + statusText + '</span></td>';
+      html += '<td class="text-xs" style="max-width:260px;overflow-wrap:anywhere;">' + escapeHtml(txOrErr) + '</td>';
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+    historyEl.innerHTML = html;
+  } catch (e) {
+    historyEl.innerHTML = '<p class="text-muted text-sm">Unable to load deployment history.</p>';
+  }
 }
 
 async function saveSettings() {
@@ -1184,6 +1491,7 @@ async function saveSettings() {
 /* ── 10. Initialization ──────────────────────────────────────── */
 (function init() {
   checkOnboarding();
+  handleOauthResultFromUrl();
 
   /* Route on load */
   var initialPage = location.hash.slice(1) || 'overview';

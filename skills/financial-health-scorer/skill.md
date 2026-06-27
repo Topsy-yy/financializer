@@ -131,7 +131,7 @@ Each component score is derived as `100 - risk_score` from its source skill. The
 
 - Populates the **Health Score** KPI card (`#kpi-health`)
 - Determines the color class (`text-emerald`, `text-amber`, `text-red`)
-- Drives the AI Controller Summary headline
+- Drives the FinGuard AI Summary headline
 
 ## Source
 

@@ -3,41 +3,122 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="AI Financial Controller — Your finance department in one screen" />
-    <title>AI Financial Controller</title>
+    <meta name="description" content="FinGuard AI — Your finance department in one screen" />
+    <title>FinGuard AI</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
-    <!-- SIGNUP OVERLAY -->
+    <!-- ONBOARDING OVERLAY — Multi-Step Wizard -->
     <div id="signup-overlay" class="signup-overlay">
-        <div class="glass-card signup-card">
-            <h2 class="text-brand">Welcome to AI Financial Controller</h2>
-            <p class="text-muted text-sm" style="margin-bottom: 1.5rem;">Connect your integrations or try Demo Mode.</p>
-            <form id="signup-form" class="signup-form">
-                <div class="form-group">
-                    <label for="input-name">Your Name</label>
-                    <input type="text" id="input-name" placeholder="e.g. Jane Doe" required />
+        <div class="glass-card signup-card onboarding-wizard">
+
+            <!-- Progress Indicator -->
+            <div class="onboarding-progress">
+                <div class="progress-step active" id="prog-step-1">
+                    <span class="step-number">1</span>
+                    <span class="step-label">Zoho Books</span>
                 </div>
-                <div class="form-group">
-                    <label for="input-company">Company Name</label>
-                    <input type="text" id="input-company" placeholder="e.g. Acme Corp" required />
+                <div class="progress-connector"></div>
+                <div class="progress-step" id="prog-step-2">
+                    <span class="step-number">2</span>
+                    <span class="step-label">Core Wallet</span>
                 </div>
-                <div class="form-group">
-                    <label for="input-zoho">Zoho API Key</label>
-                    <input type="password" id="input-zoho" placeholder="Optional" />
+            </div>
+
+            <!-- STEP 1: Continue with Zoho Books -->
+            <div id="onboard-step-1" class="onboard-step active">
+                <div class="step-header">
+                    <span class="step-icon">📚</span>
+                    <h2 class="text-brand">Connect Zoho Books</h2>
+                    <p class="text-muted text-sm">Link your Zoho Books account to import financial data automatically.</p>
                 </div>
+
+                <form id="signup-form" class="signup-form">
+                    <div class="form-group">
+                        <label for="input-name">Your Name</label>
+                        <input type="text" id="input-name" placeholder="e.g. Jane Doe" required />
+                    </div>
+                    <div class="form-group">
+                        <label for="input-company">Company Name</label>
+                        <input type="text" id="input-company" placeholder="e.g. Acme Corp" required />
+                    </div>
+
+                    <div class="integration-divider">
+                        <span class="divider-line"></span>
+                        <span class="divider-text">Zoho Books Integration</span>
+                        <span class="divider-line"></span>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="input-zoho-org">Zoho Organization ID</label>
+                        <input type="text" id="input-zoho-org" placeholder="e.g. 10234695" />
+                    </div>
+                    <div class="form-group">
+                        <label for="input-zoho">Zoho API Key / OAuth Token</label>
+                        <input type="password" id="input-zoho" placeholder="Paste your Zoho Books API key" />
+                    </div>
+
+                    <button type="button" id="btn-zoho-oauth" class="btn-secondary btn-full" style="margin-bottom:0.75rem;">
+                        <span class="btn-icon">🔐</span>
+                        Connect with Zoho OAuth
+                    </button>
+
+                    <button type="submit" class="btn-primary btn-full">
+                        <span class="btn-icon">📚</span>
+                        Continue with Zoho Books
+                    </button>
+                </form>
+
+                <div class="onboard-alt">
+                    <p class="text-muted text-sm">Don't have a Zoho account?</p>
+                    <button type="button" id="btn-demo-mode" class="btn-secondary btn-full">
+                        <span class="btn-icon">🧪</span>
+                        Skip to Demo Mode
+                    </button>
+                </div>
+            </div>
+
+            <!-- STEP 2: Connect to Core Wallet -->
+            <div id="onboard-step-2" class="onboard-step">
+                <div class="step-header">
+                    <span class="step-icon">🔗</span>
+                    <h2 class="text-brand">Connect Core Wallet</h2>
+                    <p class="text-muted text-sm">Link your Avalanche C-Chain wallet for on-chain financial notifications and audit trail.</p>
+                </div>
+
+                <div class="wallet-info glass-card">
+                    <div class="wallet-info-row">
+                        <span class="text-muted text-sm">Network</span>
+                        <span class="text-sm">Avalanche C-Chain</span>
+                    </div>
+                    <div class="wallet-info-row">
+                        <span class="text-muted text-sm">Purpose</span>
+                        <span class="text-sm">Financial alerts & audit hash</span>
+                    </div>
+                </div>
+
                 <div class="form-group">
-                    <label for="input-wallet">Avalanche Wallet Address</label>
+                    <label for="input-wallet">Wallet Address</label>
                     <input type="text" id="input-wallet" placeholder="0x..." />
                 </div>
+
                 <div class="signup-actions">
-                    <button type="submit" class="btn-primary">Connect & Start</button>
-                    <button type="button" id="btn-demo-mode" class="btn-secondary">Skip to Demo Mode</button>
+                    <button type="button" id="btn-connect-wallet" class="btn-primary btn-full">
+                        <span class="btn-icon">🔗</span>
+                        Connect Core Wallet
+                    </button>
                 </div>
-            </form>
+
+                <div class="onboard-alt">
+                    <button type="button" id="btn-skip-wallet" class="btn-ghost">
+                        Skip for now →
+                    </button>
+                </div>
+            </div>
+
         </div>
     </div>
 
@@ -47,7 +128,7 @@
         <!-- SIDEBAR -->
         <nav class="sidebar">
             <div class="brand">
-                <h2>AI Financial Controller</h2>
+                <h2>FinGuard AI</h2>
                 <p>"Your finance department in one screen."</p>
             </div>
 
@@ -61,7 +142,8 @@
                 <li><a href="#customers" data-page="customers">👥 Customers</a></li>
                 <li><a href="#actions" data-page="actions">✅ Action Center</a></li>
                 <li><a href="#reports" data-page="reports">📄 Executive Reports</a></li>
-                <li><a href="#ai-controller" data-page="ai-controller">🤖 AI Controller</a></li>
+                <li><a href="#contracts" data-page="contracts">🧾 Contracts</a></li>
+                <li><a href="#ai-controller" data-page="ai-controller">🤖 FinGuard AI</a></li>
                 <li><a href="#settings" data-page="settings">⚙ Settings</a></li>
             </ul>
 

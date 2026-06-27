@@ -1,4 +1,5 @@
 const express = require("express");
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const config = require("../config");
@@ -7,6 +8,9 @@ const { analyzeFinancialRisk } = require("../services/riskEngine");
 const { buildStructuredReport } = require("../services/reportBuilder");
 const { runFollowUpWorkflow } = require("../services/followUpWorkflow");
 const { getCoreWalletIntegrationSummary } = require("../services/coreWalletClient");
+const { deployCChainContract } = require("../services/avalancheContractDeployer");
+const { appendDeploymentRecord, listDeploymentRecords } = require("../services/contractDeploymentHistory");
+const { listContractTemplates } = require("../services/contractTemplateRegistry");
 
 const router = express.Router();
 
@@ -14,6 +18,8 @@ let memoryProfile = {
   userName: config.userName || "Aisha",
   businessName: config.businessName || "ABC Traders Ltd",
   zohoApiKey: config.zohoApiKey || "",
+  zohoOrgId: "",
+  zohoRefreshToken: "",
   walletAddress: "",
   aiProvider: "openai",
   aiApiKey: "",
@@ -22,6 +28,20 @@ let memoryProfile = {
 
 let latestReviewContext = null;
 const reviewHistory = [];
+const oauthStateStore = new Map();
+
+function hasZohoOAuthConfig() {
+  return Boolean(config.zohoOauthClientId && config.zohoOauthClientSecret && config.zohoOauthRedirectUri);
+}
+
+function cleanupOauthState() {
+  const now = Date.now();
+  for (const [state, payload] of oauthStateStore.entries()) {
+    if (!payload || payload.expiresAt < now) {
+      oauthStateStore.delete(state);
+    }
+  }
+}
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -774,8 +794,8 @@ function buildChatResponse(intent, analysis, month, assistantConfig) {
 
     case "general":
     default: {
-      text = `Hello! I'm your AI Financial Controller. I can analyze your financial data, detect anomalies, assess risks, and suggest follow-up actions. Select a month from the sidebar or ask me a specific question.`;
-      html = `<p>Hello! I'm your <strong>AI Financial Controller</strong>.</p>
+      text = `Hello! I'm your FinGuard AI. I can analyze your financial data, detect anomalies, assess risks, and suggest follow-up actions. Select a month from the sidebar or ask me a specific question.`;
+      html = `<p>Hello! I'm your <strong>FinGuard AI</strong>.</p>
 <p>I can help you with:</p>
 <ul>
   <li><strong>Monthly financial analysis</strong> — Select a month from the sidebar</li>
@@ -824,6 +844,83 @@ router.get("/health", (req, res) => {
   res.json({ ok: true, service: "ai-financial-controller", now: new Date().toISOString() });
 });
 
+router.get("/oauth/zoho/start", (req, res) => {
+  if (!hasZohoOAuthConfig()) {
+    return res.redirect("/?oauth=not_configured");
+  }
+
+  cleanupOauthState();
+
+  const state = crypto.randomBytes(16).toString("hex");
+  oauthStateStore.set(state, {
+    name: typeof req.query.name === "string" ? req.query.name.trim() : "",
+    businessName: typeof req.query.business_name === "string" ? req.query.business_name.trim() : "",
+    zohoOrgId: typeof req.query.zoho_org_id === "string" ? req.query.zoho_org_id.trim() : "",
+    expiresAt: Date.now() + 10 * 60 * 1000
+  });
+
+  const authUrl = new URL(config.zohoOauthAuthUrl);
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("client_id", config.zohoOauthClientId);
+  authUrl.searchParams.set("redirect_uri", config.zohoOauthRedirectUri);
+  authUrl.searchParams.set("scope", config.zohoOauthScope);
+  authUrl.searchParams.set("access_type", "offline");
+  authUrl.searchParams.set("prompt", "consent");
+  authUrl.searchParams.set("state", state);
+
+  return res.redirect(authUrl.toString());
+});
+
+router.get("/oauth/zoho/callback", async (req, res) => {
+  const { code, state, error } = req.query || {};
+
+  if (error) {
+    return res.redirect(`/?oauth=error&reason=${encodeURIComponent(String(error))}`);
+  }
+
+  if (!code || !state || !oauthStateStore.has(state)) {
+    return res.redirect("/?oauth=error&reason=invalid_state");
+  }
+
+  const pendingProfile = oauthStateStore.get(state);
+  oauthStateStore.delete(state);
+
+  try {
+    const tokenPayload = new URLSearchParams({
+      grant_type: "authorization_code",
+      code: String(code),
+      client_id: config.zohoOauthClientId,
+      client_secret: config.zohoOauthClientSecret,
+      redirect_uri: config.zohoOauthRedirectUri
+    });
+
+    const tokenResponse = await fetch(config.zohoOauthTokenUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded"
+      },
+      body: tokenPayload.toString()
+    });
+
+    const tokenData = await tokenResponse.json();
+    if (!tokenResponse.ok || tokenData.error || !tokenData.access_token) {
+      const reason = tokenData.error || `token_exchange_${tokenResponse.status}`;
+      return res.redirect(`/?oauth=error&reason=${encodeURIComponent(String(reason))}`);
+    }
+
+    memoryProfile.zohoApiKey = tokenData.access_token;
+    memoryProfile.zohoRefreshToken = tokenData.refresh_token || memoryProfile.zohoRefreshToken;
+
+    if (pendingProfile?.name) memoryProfile.userName = pendingProfile.name;
+    if (pendingProfile?.businessName) memoryProfile.businessName = pendingProfile.businessName;
+    if (pendingProfile?.zohoOrgId) memoryProfile.zohoOrgId = pendingProfile.zohoOrgId;
+
+    return res.redirect("/?oauth=success");
+  } catch (exchangeError) {
+    return res.redirect(`/?oauth=error&reason=${encodeURIComponent(exchangeError.message || "token_exchange_failed")}`);
+  }
+});
+
 router.get("/profile", (req, res) => {
   const zohoConnected = Boolean(memoryProfile.zohoApiKey || config.zohoDirectApiUrl);
   const zohoState = zohoConnected ? "configured" : "not configured";
@@ -838,6 +935,8 @@ router.get("/profile", (req, res) => {
       business_name: memoryProfile.businessName,
       name: memoryProfile.userName,
       zoho_connected: zohoConnected,
+      zoho_oauth_configured: hasZohoOAuthConfig(),
+      zoho_org_id: memoryProfile.zohoOrgId,
       wallet_address: memoryProfile.walletAddress,
       zoho_api_key: memoryProfile.zohoApiKey ? "***" : "",
       ai_provider: memoryProfile.aiProvider,
@@ -861,6 +960,15 @@ router.get("/profile", (req, res) => {
           note: zohoConnected ? "Zoho API credentials are set" : "Zoho API credentials are missing"
         },
         {
+          label: "Zoho OAuth",
+          connected: hasZohoOAuthConfig(),
+          state: hasZohoOAuthConfig() ? "ready" : "missing env",
+          secureReference: "***",
+          note: hasZohoOAuthConfig()
+            ? "OAuth client config detected"
+            : "Set ZOHO_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI"
+        },
+        {
           label: "AI API",
           connected: aiConnected,
           state: aiConnected ? "configured" : "not configured",
@@ -879,10 +987,12 @@ router.post("/profile", (req, res) => {
     userName,
     businessName,
     zohoApiKey,
+    zohoOrgId,
     walletAddress,
     name,
     business_name,
     zoho_api_key,
+    zoho_org_id,
     wallet_address,
     aiProvider,
     aiApiKey,
@@ -895,6 +1005,7 @@ router.post("/profile", (req, res) => {
   const resolvedName = userName || name;
   const resolvedBusinessName = businessName || business_name;
   const resolvedZoho = zohoApiKey || zoho_api_key;
+  const resolvedZohoOrgId = zohoOrgId || zoho_org_id;
   const resolvedWallet = walletAddress !== undefined ? walletAddress : wallet_address;
   const resolvedAiProvider = aiProvider || ai_provider;
   const resolvedAiApiKey = aiApiKey || ai_api_key;
@@ -903,6 +1014,7 @@ router.post("/profile", (req, res) => {
   if (resolvedName) memoryProfile.userName = resolvedName;
   if (resolvedBusinessName) memoryProfile.businessName = resolvedBusinessName;
   if (resolvedZoho) memoryProfile.zohoApiKey = resolvedZoho;
+  if (resolvedZohoOrgId) memoryProfile.zohoOrgId = resolvedZohoOrgId;
   if (resolvedWallet !== undefined) memoryProfile.walletAddress = resolvedWallet;
   if (resolvedAiProvider) memoryProfile.aiProvider = resolvedAiProvider;
   if (resolvedAiApiKey) memoryProfile.aiApiKey = resolvedAiApiKey;
@@ -1090,6 +1202,62 @@ router.post("/chat", async (req, res) => {
   } catch (error) {
     res.status(500).json({ ok: false, error: error.message });
   }
+});
+
+router.post("/avalanche/contracts/deploy", async (req, res) => {
+  try {
+    const result = await deployCChainContract(req.body || {});
+    const requestBody = req.body || {};
+    appendDeploymentRecord({
+      contract_name: result?.plan?.contract_name || requestBody.contractName || requestBody.contract_name || "Contract",
+      receiver_address: requestBody.receiverAddress || requestBody.receiver_address || requestBody.recipient || requestBody.to || "",
+      dry_run: Boolean(result.dry_run),
+      ok: Boolean(result.ok),
+      mode: result?.plan?.mode || (requestBody.dryRun === false ? "live" : "dry-run"),
+      chain_id: result?.plan?.chain_id || null,
+      rpc_url: result?.plan?.rpc_url || "",
+      tx_hash: result?.deployment?.tx_hash || "",
+      address: result?.deployment?.address || "",
+      error: result.ok ? "" : (result.error || "unknown_error"),
+      message: result.message || "",
+      actor: memoryProfile.userName || "unknown"
+    });
+
+    const statusCode = result.ok ? 200 : 400;
+    return res.status(statusCode).json(result);
+  } catch (error) {
+    const requestBody = req.body || {};
+    appendDeploymentRecord({
+      contract_name: requestBody.contractName || requestBody.contract_name || "Contract",
+      receiver_address: requestBody.receiverAddress || requestBody.receiver_address || requestBody.recipient || requestBody.to || "",
+      dry_run: requestBody.dryRun !== false,
+      ok: false,
+      mode: requestBody.dryRun === false ? "live" : "dry-run",
+      chain_id: requestBody.chainId || requestBody.chain_id || null,
+      rpc_url: requestBody.rpcUrl || requestBody.rpc_url || "",
+      tx_hash: "",
+      address: "",
+      error: "deploy_failed",
+      message: error.message,
+      actor: memoryProfile.userName || "unknown"
+    });
+
+    return res.status(500).json({
+      ok: false,
+      error: "deploy_failed",
+      message: error.message
+    });
+  }
+});
+
+router.get("/avalanche/contracts/templates", (req, res) => {
+  return res.json({ ok: true, items: listContractTemplates() });
+});
+
+router.get("/avalanche/contracts/deployments", (req, res) => {
+  const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 25));
+  const items = listDeploymentRecords(limit);
+  return res.json({ ok: true, items, count: items.length });
 });
 
 module.exports = router;

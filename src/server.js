@@ -11,5 +11,5 @@ app.use("/api", apiRouter);
 
 app.listen(config.port, () => {
   // Startup log is intentionally concise for local and cloud logs.
-  console.log(`AI Financial Controller running on port ${config.port}`);
+  console.log(`FinGuard AI running on port ${config.port}`);
 });
