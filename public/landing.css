@@ -15,7 +15,7 @@
   --border-color-strong: rgba(74, 222, 128, 0.34);
   --text-main: #eef4ee;
   --text-muted: #9fae9f;
-  --text-dim: #647065;
+  --text-dim: #7c8a7d;
   --color-emerald: #16a34a;
   --color-amber: #f2b134;
   --color-red: #e5484d;
@@ -45,6 +45,12 @@ body {
 }
 
 a { color: inherit; text-decoration: none; }
+
+:focus-visible {
+  outline: 2px solid var(--color-green-bright);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
 
 .mono { font-family: var(--font-mono); }
 .text-green { color: var(--color-green-bright); }
@@ -91,7 +97,7 @@ main, .nav, .footer { position: relative; z-index: 1; }
 .reveal {
   opacity: 0;
   transform: translateY(22px);
-  transition: opacity 0.7s cubic-bezier(0.16, 1, 0.3, 1), transform 0.7s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: opacity 0.5s cubic-bezier(0.16, 1, 0.3, 1), transform 0.5s cubic-bezier(0.16, 1, 0.3, 1);
 }
 .reveal.is-visible { opacity: 1; transform: translateY(0); }
 .reveal-stagger.is-visible .stagger-item {
@@ -172,8 +178,54 @@ main, .nav, .footer { position: relative; z-index: 1; }
 .nav-links a:hover::after { right: 0; }
 .btn-nav { padding: 0.5rem 1.1rem; font-size: 0.85rem; }
 
+.nav-toggle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border-radius: 10px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border-color);
+  color: var(--text-main);
+  cursor: pointer;
+}
+.nav-toggle svg { width: 20px; height: 20px; }
+.nav-toggle .icon-close { display: none; }
+.nav-toggle.is-open .icon-menu { display: none; }
+.nav-toggle.is-open .icon-close { display: block; }
+
 @media (max-width: 780px) {
-  .nav-links { display: none; }
+  .nav-links {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: rgba(7, 9, 7, 0.97);
+    backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--border-color);
+    max-height: 0;
+    overflow: hidden;
+    visibility: hidden;
+    transition: max-height 0.3s cubic-bezier(0.16, 1, 0.3, 1), visibility 0.3s;
+  }
+  .nav-links.is-open { max-height: 60vh; visibility: visible; overflow-y: auto; }
+  .nav-links a {
+    width: 100%;
+    padding: 0.9rem 1.5rem;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    box-sizing: border-box;
+  }
+  .nav-links a::after { display: none; }
+  .nav-toggle { display: flex; }
+  .btn-nav { min-height: 44px; padding: 0.6rem 1.2rem; }
 }
 
 /* ── Buttons ──────────────────────────────────────────────────── */

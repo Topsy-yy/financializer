@@ -1383,7 +1383,12 @@ router.post("/monthly-review", async (req, res) => {
     context.rawAnalysis = analysis;
     req.userStore.latestReviewContext = context;
 
-    const resolvedAiKey = req.userStore.profile.aiApiKey || "";
+    // Bring-your-own-AI: a user-configured key/provider in Settings always
+    // wins. Otherwise fall back to the app's built-in default AI (NVIDIA),
+    // so analysis works out of the box without the user ever touching Settings.
+    const ownAiKey = req.userStore.profile.aiApiKey || "";
+    const resolvedAiKey = ownAiKey || config.nvidiaApiKey || "";
+    const resolvedAiProvider = ownAiKey ? req.userStore.profile.aiProvider : "nvidia";
     const shouldUseAi = use_ai_analysis !== false;
     let aiAnalysis = {
       ok: false,
@@ -1399,7 +1404,8 @@ router.post("/monthly-review", async (req, res) => {
         // it founder-friendly voice -- it never recomputes or overrides it.
         const aiResult = await generateAiInterpretation({
           apiKey: resolvedAiKey,
-          provider: req.userStore.profile.aiProvider,
+          provider: resolvedAiProvider,
+          assistant: req.userStore.profile.aiAssistant,
           businessName: businessName || req.userStore.profile.businessName,
           period: context.period,
           skillOutputs: {
@@ -1652,9 +1658,10 @@ router.post("/chat", async (req, res) => {
       });
     }
 
-    const resolvedProvider = ai_provider || req.userStore.profile.aiProvider;
     const resolvedAssistant = ai_assistant || req.userStore.profile.aiAssistant;
-    const resolvedAiKey = req.userStore.profile.aiApiKey || "";
+    const ownAiKey = req.userStore.profile.aiApiKey || "";
+    const resolvedAiKey = ownAiKey || config.nvidiaApiKey || "";
+    const resolvedProvider = ownAiKey ? (ai_provider || req.userStore.profile.aiProvider) : "nvidia";
     let aiFailureReason = null;
 
     if (resolvedAiKey) {

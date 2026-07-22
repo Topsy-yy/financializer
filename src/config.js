@@ -43,6 +43,9 @@ module.exports = {
   aiApiModel: process.env.AI_API_MODEL || "gpt-5-mini",
   aiApiTimeoutMs: Number(process.env.AI_API_TIMEOUT_MS || 15000),
   enableAiAnalysis: String(process.env.ENABLE_AI_ANALYSIS || "true") === "true",
+  // Backs the app's built-in default AI (no user-provided key required). One
+  // key from build.nvidia.com unlocks every model the app routes to.
+  nvidiaApiKey: process.env.NVIDIA_API_KEY || "",
   businessOwnerKeywords: parseCsvEnv(process.env.BUSINESS_OWNER_KEYWORDS),
   alertEmails: parseCsvEnv(process.env.ALERT_EMAILS),
   avalancheCliPath: process.env.AVALANCHE_CLI_PATH || "avalanche",

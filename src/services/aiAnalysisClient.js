@@ -13,6 +13,27 @@ const DEEPSEEK_BASE_URL = "https://api.deepseek.com";
 const DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash";
 const XAI_BASE_URL = "https://api.x.ai/v1";
 const XAI_DEFAULT_MODEL = "grok-4.5";
+const NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1";
+// The app's built-in default LLMs (no user-provided key needed). One NVIDIA
+// build.nvidia.com key covers all of these -- each assistant persona is
+// routed to whichever model fits it best. Users who bring their own AI
+// provider/key in Settings bypass this entirely.
+const NVIDIA_MODEL_BY_ASSISTANT = {
+  "controller-core": "meta/llama-3.1-70b-instruct",
+  "risk-analyst": "nvidia/llama-3.3-nemotron-super-49b-v1",
+  // mixtral-8x22b-instruct-v0.1 reached end-of-life on NVIDIA's catalog
+  // (2026-05-21, HTTP 410) -- llama-3.2-3b-instruct is small/fast, a good
+  // fit for the interactive cashflow-guardian chat persona.
+  "cashflow-guardian": "meta/llama-3.2-3b-instruct",
+  // deepseek-r1-distill-qwen-32b 404s on this catalog (retired/gated) --
+  // mixtral-8x7b-instruct-v0.1 verified live as of 2026-07-22.
+  "executive-brief": "mistralai/mixtral-8x7b-instruct-v0.1"
+};
+const NVIDIA_FALLBACK_MODEL = "qwen/qwen3-next-80b-a3b-instruct";
+
+function resolveNvidiaModel(assistant) {
+  return NVIDIA_MODEL_BY_ASSISTANT[assistant] || NVIDIA_FALLBACK_MODEL;
+}
 const SYSTEM_PROMPT =
   "You are FinGuard AI, the interpretation and narration layer for an SME financial controller app. " +
   "All figures you are given (scores, findings, amounts, percentages) are already computed by a " +
@@ -241,11 +262,12 @@ function parseJsonMaybe(text) {
   }
 }
 
-async function callOpenAiCompatible({ apiKey, provider, prompt, temperature, baseUrlOverride, modelOverride }) {
+async function callOpenAiCompatible({ apiKey, provider, prompt, temperature, baseUrlOverride, modelOverride, timeoutMsOverride, maxTokens }) {
   const model = modelOverride || config.aiApiModel || "gpt-5-mini";
   const endpoint = buildEndpoint(baseUrlOverride || config.aiApiBaseUrl);
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), clamp(toNumber(config.aiApiTimeoutMs, 15000), 3000, 60000));
+  const timeoutMs = timeoutMsOverride || clamp(toNumber(config.aiApiTimeoutMs, 15000), 3000, 60000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const res = await fetch(endpoint, {
@@ -257,6 +279,7 @@ async function callOpenAiCompatible({ apiKey, provider, prompt, temperature, bas
       body: JSON.stringify({
         model,
         temperature,
+        max_tokens: maxTokens || 1024,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: prompt }
@@ -372,7 +395,7 @@ async function callGemini({ apiKey, prompt, temperature, maxTokens }) {
   }
 }
 
-async function callChatCompletions({ apiKey, provider, prompt, temperature = 0.2, maxTokens }) {
+async function callChatCompletions({ apiKey, provider, prompt, temperature = 0.2, maxTokens, assistant }) {
   if (!config.enableAiAnalysis) {
     return { ok: false, reason: "ai_analysis_disabled" };
   }
@@ -395,6 +418,7 @@ async function callChatCompletions({ apiKey, provider, prompt, temperature = 0.2
       provider,
       prompt,
       temperature,
+      maxTokens,
       baseUrlOverride: DEEPSEEK_BASE_URL,
       modelOverride: DEEPSEEK_DEFAULT_MODEL
     });
@@ -407,17 +431,35 @@ async function callChatCompletions({ apiKey, provider, prompt, temperature = 0.2
       provider,
       prompt,
       temperature,
+      maxTokens,
       baseUrlOverride: XAI_BASE_URL,
       modelOverride: XAI_DEFAULT_MODEL
     });
   }
+  if (normalizedProvider === "nvidia" || normalizedProvider === "nim") {
+    // NVIDIA NIM (build.nvidia.com) is also OpenAI-compatible, and offers a
+    // free-credits tier that doesn't require billing to be set up first.
+    // Its shared free-tier infra is measurably slower than a dedicated
+    // provider (~15 tokens/sec observed), so it gets a longer timeout and a
+    // tighter max_tokens cap than other providers to keep latency reasonable.
+    return callOpenAiCompatible({
+      apiKey,
+      provider,
+      prompt,
+      temperature,
+      maxTokens: Math.min(maxTokens || 1024, 1536),
+      baseUrlOverride: NVIDIA_BASE_URL,
+      modelOverride: resolveNvidiaModel(assistant),
+      timeoutMsOverride: 90000
+    });
+  }
 
-  return callOpenAiCompatible({ apiKey, provider, prompt, temperature });
+  return callOpenAiCompatible({ apiKey, provider, prompt, temperature, maxTokens });
 }
 
 async function generateAiChatResponse({ apiKey, provider, assistant, month, context, message }) {
   const prompt = buildChatPrompt({ provider, assistant, month, context, message });
-  const completion = await callChatCompletions({ apiKey, provider, prompt, temperature: 0.35 });
+  const completion = await callChatCompletions({ apiKey, provider, prompt, temperature: 0.35, assistant });
 
   if (!completion.ok) return completion;
 
@@ -447,9 +489,9 @@ function normalizePageNarrative(page) {
  * plus the skill docs and produce founder-facing narrative, key findings, and
  * an executive report -- never to recompute or contradict the figures.
  */
-async function generateAiInterpretation({ apiKey, provider, businessName, period, skillOutputs }) {
+async function generateAiInterpretation({ apiKey, provider, assistant, businessName, period, skillOutputs }) {
   const prompt = buildInterpretationPrompt({ businessName, period, skillOutputs });
-  const completion = await callChatCompletions({ apiKey, provider, prompt, temperature: 0.15, maxTokens: 3072 });
+  const completion = await callChatCompletions({ apiKey, provider, prompt, temperature: 0.15, maxTokens: 3072, assistant });
 
   if (!completion.ok) return completion;
 

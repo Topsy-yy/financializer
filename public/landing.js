@@ -13,6 +13,29 @@
   window.addEventListener('scroll', onScroll, { passive: true });
   onScroll();
 
+  /* ── Mobile nav toggle ─────────────────────────────────────────── */
+  var navToggle = document.getElementById('nav-toggle');
+  var navLinks = document.getElementById('nav-links');
+  function closeNav() {
+    if (!navToggle || !navLinks) return;
+    navToggle.classList.remove('is-open');
+    navToggle.setAttribute('aria-expanded', 'false');
+    navLinks.classList.remove('is-open');
+  }
+  if (navToggle && navLinks) {
+    navToggle.addEventListener('click', function () {
+      var open = navToggle.classList.toggle('is-open');
+      navToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+      navLinks.classList.toggle('is-open', open);
+    });
+    navLinks.addEventListener('click', function (e) {
+      if (e.target.tagName === 'A') closeNav();
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') closeNav();
+    });
+  }
+
   /* ── Scroll-reveal ─────────────────────────────────────────────
      Elements marked .reveal fade/slide in the first time they cross
      into the viewport. .reveal-stagger additionally staggers direct

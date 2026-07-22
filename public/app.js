@@ -1104,10 +1104,11 @@ function renderOverview() {
     }
   } else if (aiAnalysis.reason === 'missing_ai_api_key' || aiAnalysis.mode === 'skills-fallback') {
     var fallbackHint = aiAnalysis.reason === 'missing_ai_api_key'
-      ? 'Connect an AI provider in <a href="#settings" class="text-brand" style="text-decoration:underline;">Settings</a> for richer AI-written analysis.'
+      ? 'Connect an AI provider in Settings for richer AI-written analysis.'
       : escapeHtml(AI_FAILURE_MESSAGES[aiAnalysis.reason] || ('AI analysis failed (' + aiAnalysis.reason + '). Showing rule-based analysis instead.'));
     aiSummaryBody = '<p class="text-sm" style="line-height:1.7;white-space:pre-wrap;">' + escapeHtml(typeof ai === 'string' ? ai : JSON.stringify(ai, null, 2)) + '</p>' +
-      '<p class="text-xs text-muted" style="margin-top:0.75rem;">' + fallbackHint + '</p>';
+      '<p class="text-xs text-muted" style="margin-top:0.75rem;">' + fallbackHint + '</p>' +
+      '<button type="button" class="btn-secondary btn-small" style="margin-top:0.6rem;" onclick="navigate(\'settings\')">' + icon('settings') + ' Switch AI provider</button>';
   } else {
     aiSummaryBody = '<p class="text-sm" style="line-height:1.7;white-space:pre-wrap;">' + escapeHtml(typeof ai === 'string' ? ai : JSON.stringify(ai, null, 2)) + '</p>';
   }
@@ -1960,6 +1961,7 @@ function renderSettings() {
       '<option value="google"' + (appState.aiProvider === 'google' ? ' selected' : '') + '>Google (Gemini)</option>' +
       '<option value="deepseek"' + (appState.aiProvider === 'deepseek' ? ' selected' : '') + '>DeepSeek</option>' +
       '<option value="grok"' + (appState.aiProvider === 'grok' ? ' selected' : '') + '>Grok (xAI)</option>' +
+      '<option value="nvidia"' + (appState.aiProvider === 'nvidia' ? ' selected' : '') + '>NVIDIA NIM</option>' +
       '<option value="azure-openai"' + (appState.aiProvider === 'azure-openai' ? ' selected' : '') + '>Azure OpenAI</option>' +
       '<option value="custom"' + (appState.aiProvider === 'custom' ? ' selected' : '') + '>Custom</option>' +
     '</select></div>';
@@ -2021,7 +2023,8 @@ var AI_KEY_LINKS = {
   anthropic: { url: 'https://console.anthropic.com/settings/keys', label: 'console.anthropic.com' },
   google: { url: 'https://aistudio.google.com/apikey', label: 'aistudio.google.com' },
   deepseek: { url: 'https://platform.deepseek.com/api_keys', label: 'platform.deepseek.com' },
-  grok: { url: 'https://console.x.ai/team/default/api-keys', label: 'console.x.ai' }
+  grok: { url: 'https://console.x.ai/team/default/api-keys', label: 'console.x.ai' },
+  nvidia: { url: 'https://build.nvidia.com', label: 'build.nvidia.com (free credits, no card)' }
 };
 
 function updateAiKeyHint(provider) {
