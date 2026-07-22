@@ -1,20 +1,51 @@
+const fs = require("fs");
+const path = require("path");
+
+const buildDir = path.resolve(__dirname, "..", "contracts", "build");
+
+function loadArtifact(fileName) {
+  const filePath = path.join(buildDir, fileName);
+  if (!fs.existsSync(filePath)) {
+    // Self-heal: build artifacts are gitignored and regenerated via postinstall,
+    // but compile on demand if they're missing for any reason (fresh checkout
+    // without npm install, artifacts deleted, etc).
+    const { compile } = require("../../scripts/compile-contracts");
+    compile();
+  }
+  if (!fs.existsSync(filePath)) {
+    throw new Error(
+      `Missing compiled contract artifact: ${fileName}. Run "npm run build:contracts" first.`
+    );
+  }
+  return JSON.parse(fs.readFileSync(filePath, "utf-8"));
+}
+
+const treasuryGuard = loadArtifact("TreasuryGuard.json");
+const invoiceVault = loadArtifact("InvoiceVault.json");
+
 const TEMPLATES = [
   {
     id: "treasury-guard-v1",
-    contractName: "TreasuryGuard",
+    contractName: treasuryGuard.contractName,
     label: "Treasury Guard",
-    description: "Treasury controls with policy events and minimal setup.",
-    abi: [{ type: "constructor", inputs: [] }],
-    bytecode: "0x6080604052348015600e575f5ffd5b50603e80601a5f395ff3fe60806040525f5ffdfea2646970667358221220b1c3f53c0f9c6b376d47d1f8a2571dc3c2db80f31f5ef4e2ccf0979f584e26ea64736f6c634300081c0033",
+    icon: "shield",
+    description:
+      "Locks your business funds in a contract only you control. Anyone can send money in, but only " +
+      "you (the owner) can approve withdrawals — and every deposit or withdrawal is permanently recorded on-chain.",
+    abi: treasuryGuard.abi,
+    bytecode: treasuryGuard.bytecode,
     constructorArgsSchema: []
   },
   {
     id: "invoice-vault-v1",
-    contractName: "InvoiceVault",
+    contractName: invoiceVault.contractName,
     label: "Invoice Vault",
-    description: "Simple on-chain invoice vault contract for audit-ready records.",
-    abi: [{ type: "constructor", inputs: [] }],
-    bytecode: "0x6080604052348015600e575f5ffd5b50603e80601a5f395ff3fe60806040525f5ffdfea2646970667358221220b1c3f53c0f9c6b376d47d1f8a2571dc3c2db80f31f5ef4e2ccf0979f584e26ea64736f6c634300081c0033",
+    icon: "file-text",
+    description:
+      "Keeps a tamper-proof, permanent record of every invoice you issue — amount, timestamp, and paid " +
+      "status — so you always have proof of what was billed and when, even years later.",
+    abi: invoiceVault.abi,
+    bytecode: invoiceVault.bytecode,
     constructorArgsSchema: []
   }
 ];
@@ -24,7 +55,10 @@ function listContractTemplates() {
     id: item.id,
     contract_name: item.contractName,
     label: item.label,
+    icon: item.icon,
     description: item.description,
+    abi: item.abi,
+    bytecode: item.bytecode,
     constructor_args_schema: item.constructorArgsSchema || []
   }));
 }

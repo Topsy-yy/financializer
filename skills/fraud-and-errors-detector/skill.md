@@ -22,8 +22,10 @@ Detect:
 - **Statistical outliers** — Transactions exceeding mean + 2σ of the dataset
 - **Missing fields** — Transactions without date, account, amount, or description
 - **Missing references** — Journal entries without debit/credit accounts or amounts
-- **Personal/business expense mixing** — Counterparty or description matching owner keywords
-- **Unreconciled transactions** — Accounts where `isReconciled === false`
+- **Personal/business expense mixing** — Zoho Books' own `is_personal` flag on an expense when available, otherwise counterparty/description matching owner keywords
+- **Missing receipts** — Expenses with no receipt attached (Zoho `expense_receipt_name` empty)
+- **Unreconciled transactions** — Bank-feed transactions whose Zoho Books status is `uncategorized`
+- **Overdue receivables/payables** — Invoices/bills with an outstanding `balance` past their `due_date`
 - **Unusual transaction timing** — Entries posted on weekends, holidays, or outside business hours
 
 ## Inputs
@@ -98,8 +100,11 @@ Detect:
 | Round-number payment | `amount >= 10,000` AND `amount % 1,000 === 0` | Medium |
 | Statistical outlier | `amount > mean + 2σ` | Medium |
 | Missing fields | Required field is null/empty | Low |
-| Mixed funds | Owner keyword in description/counterparty | High |
-| Unreconciled | `isReconciled === false` | Medium |
+| Mixed funds | `is_personal === true`, else owner keyword in description/counterparty | High |
+| Missing documentation | Expense has no receipt attached | Low |
+| Unreconciled | Bank transaction status is `uncategorized` | High |
+| Overdue receivable | Invoice `balance > 0` past `due_date` | High |
+| Overdue payable | Bill `balance > 0` past `due_date` | Medium |
 | Weekend transaction | Date falls on Saturday/Sunday | Low |
 
 ## Risk Score Calculation

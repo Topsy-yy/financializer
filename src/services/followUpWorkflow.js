@@ -114,13 +114,14 @@ async function notifyViaAvalanche(report, actions) {
   return { sent: true, response };
 }
 
-async function runFollowUpWorkflow(report) {
+async function runFollowUpWorkflow(report, reportsDir) {
   const actions = createFollowUpActions(report);
+  const targetDir = reportsDir || config.reportsDir;
 
   const reportId = `${report.period || "period"}-${timestampSlug()}`;
-  const actionsFile = path.resolve(config.reportsDir, `${reportId}-actions.csv`);
-  const reportFile = path.resolve(config.reportsDir, `${reportId}-report.json`);
-  const reportTextFile = path.resolve(config.reportsDir, `${reportId}-report.txt`);
+  const actionsFile = path.resolve(targetDir, `${reportId}-actions.csv`);
+  const reportFile = path.resolve(targetDir, `${reportId}-report.json`);
+  const reportTextFile = path.resolve(targetDir, `${reportId}-report.txt`);
 
   fs.writeFileSync(actionsFile, toCsv(actions));
   fs.writeFileSync(reportFile, JSON.stringify(report, null, 2));

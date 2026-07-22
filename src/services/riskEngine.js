@@ -67,6 +67,10 @@ function detectMissingEntries(transactions, journalEntries) {
 function detectMixedFunds(transactions) {
   const keywords = config.businessOwnerKeywords.map((k) => k.toLowerCase());
   return transactions.filter((tx) => {
+    // Zoho Books' own `is_personal` flag (set by the bookkeeper/owner) is a
+    // direct signal -- trust it over keyword-guessing when it's present.
+    if (tx.isPersonal === true) return true;
+    if (tx.isPersonal === false) return false;
     const haystack = `${tx.counterparty || ""} ${tx.description || ""}`.toLowerCase();
     return keywords.some((keyword) => haystack.includes(keyword));
   });
@@ -76,7 +80,33 @@ function detectUnreconciledAccounts(reconciliations) {
   return reconciliations.filter((r) => !r.isReconciled);
 }
 
-function scoreCashFlowRisk(statements) {
+function detectMissingReceipts(transactions) {
+  // `hasReceipt` is only present on transactions sourced from Zoho Books
+  // expenses -- CSV imports and other sources simply have nothing to flag.
+  return transactions.filter((tx) => tx.hasReceipt === false);
+}
+
+function daysBetween(dateStr, referenceDate) {
+  const date = new Date(dateStr);
+  if (Number.isNaN(date.getTime())) return 0;
+  return Math.round((referenceDate.getTime() - date.getTime()) / (24 * 60 * 60 * 1000));
+}
+
+function detectOverdueReceivables(receivables, now = new Date()) {
+  return (receivables || []).filter((r) => {
+    if (String(r.status || "").toLowerCase() === "overdue") return true;
+    return r.dueDate && daysBetween(r.dueDate, now) > 0;
+  });
+}
+
+function detectOverduePayables(payables, now = new Date()) {
+  return (payables || []).filter((p) => {
+    if (String(p.status || "").toLowerCase() === "overdue") return true;
+    return p.dueDate && daysBetween(p.dueDate, now) > 0;
+  });
+}
+
+function scoreCashFlowRisk(statements, overdueReceivablesTotal = 0) {
   const inflow = toNumber(statements.cashFlow?.inflow);
   const outflow = Math.abs(toNumber(statements.cashFlow?.outflow));
   const net = inflow - outflow;
@@ -89,6 +119,9 @@ function scoreCashFlowRisk(statements) {
   if (monthlyBurn > 0) riskScore += 15;
   if (runwayMonths < 6) riskScore += 25;
   if (runwayMonths < 3) riskScore += 15;
+  // Real overdue receivables (from Zoho invoice balance/due_date) directly
+  // threaten near-term liquidity even when this month's cash flow looks fine.
+  if (overdueReceivablesTotal > 0 && inflow > 0 && overdueReceivablesTotal / inflow > 0.25) riskScore += 10;
 
   riskScore = Math.max(0, Math.min(100, Math.round(riskScore)));
 
@@ -123,20 +156,35 @@ function buildEarlyWarnings(cashFlowRisk, detections) {
     warnings.push("Some accounts are not reconciled. Reconciliation gaps can hide reporting errors.");
   }
 
+  if (detections.overdueReceivables.length > 0) {
+    warnings.push("Overdue customer invoices detected. Follow up to protect near-term cash flow.");
+  }
+
+  if (detections.missingReceipts.length > 0) {
+    warnings.push("Some expenses are missing receipts. Weak documentation hurts audit readiness.");
+  }
+
   return warnings;
 }
 
 function analyzeFinancialRisk(data) {
+  const overdueReceivables = detectOverdueReceivables(data.receivables);
+  const overdueReceivablesTotal = overdueReceivables.reduce((sum, r) => sum + toNumber(r.amount), 0);
+
   const detections = {
     duplicates: detectDuplicates(data.transactions),
     roundNumbers: detectRoundNumbers(data.transactions),
     unusualTransactions: detectUnusualTransactions(data.transactions),
     mixedFunds: detectMixedFunds(data.transactions),
     unreconciledAccounts: detectUnreconciledAccounts(data.reconciliations),
+    overdueReceivables,
+    overduePayables: detectOverduePayables(data.payables),
+    missingReceipts: detectMissingReceipts(data.transactions),
     ...detectMissingEntries(data.transactions, data.journalEntries)
   };
 
-  const cashFlowRisk = scoreCashFlowRisk(data.statements);
+  const cashFlowRisk = scoreCashFlowRisk(data.statements, overdueReceivablesTotal);
+  cashFlowRisk.overdueReceivablesTotal = Math.round(overdueReceivablesTotal);
   const earlyWarnings = buildEarlyWarnings(cashFlowRisk, detections);
 
   return {

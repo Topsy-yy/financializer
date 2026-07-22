@@ -2,8 +2,11 @@ const express = require("express");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const multer = require("multer");
 const config = require("../config");
 const { fetchMonthlyData } = require("../services/zohoClient");
+const zohoBooksClient = require("../services/zohoBooksClient");
+const { parseFinancialCsv } = require("../services/csvFinancialImporter");
 const { analyzeFinancialRisk } = require("../services/riskEngine");
 const { buildStructuredReport } = require("../services/reportBuilder");
 const { runFollowUpWorkflow } = require("../services/followUpWorkflow");
@@ -11,24 +14,128 @@ const { getCoreWalletIntegrationSummary } = require("../services/coreWalletClien
 const { deployCChainContract } = require("../services/avalancheContractDeployer");
 const { appendDeploymentRecord, listDeploymentRecords } = require("../services/contractDeploymentHistory");
 const { listContractTemplates } = require("../services/contractTemplateRegistry");
+const { createNonce, verifySignature } = require("../services/walletAuth");
+const { verifyDeploymentTx } = require("../services/onchainVerifier");
+const { ethers } = require("ethers");
+const { generateAiChatResponse, generateAiInterpretation } = require("../services/aiAnalysisClient");
+const googleAuth = require("../services/googleAuth");
 
 const router = express.Router();
 
-let memoryProfile = {
-  userName: config.userName || "Aisha",
-  businessName: config.businessName || "ABC Traders Ltd",
-  zohoApiKey: config.zohoApiKey || "",
-  zohoOrgId: "",
-  zohoRefreshToken: "",
-  walletAddress: "",
-  aiProvider: "openai",
-  aiApiKey: "",
-  aiAssistant: "controller-core"
-};
+function defaultProfile() {
+  return {
+    userName: config.userName || "Aisha",
+    businessName: config.businessName || "ABC Traders Ltd",
+    zohoApiKey: config.zohoApiKey || "",
+    zohoOrgId: "",
+    zohoRefreshToken: "",
+    zohoApiDomain: "",
+    zohoTokenExpiresAt: null,
+    walletAddress: "",
+    walletVerified: false,
+    walletChainId: null,
+    aiProvider: "openai",
+    aiApiKey: "",
+    aiAssistant: "controller-core",
+    googleSub: "",
+    googleName: "",
+    googleEmail: "",
+    googlePicture: ""
+  };
+}
 
-let latestReviewContext = null;
-const reviewHistory = [];
+function safeDirName(id) {
+  return String(id || "guest").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 128) || "guest";
+}
+
+/* Every visitor -- a Google-authenticated user or an anonymous guest/demo
+   session -- gets fully isolated profile, review history, uploaded data,
+   and on-disk report storage. Nothing is shared across users. */
+const userStores = new Map();
+
+// Sentinel the frontend echoes back for fields it never received the real
+// value of (see GET /profile below) -- must never be written back as data.
+const MASKED_VALUE = "***";
+
+// A visible-but-safe preview (e.g. "sk-a1******3f9k") so a user can confirm
+// which key is actually saved without the full secret ever reaching the
+// browser -- more reassuring than a plain "configured: true" boolean.
+function maskSecretPreview(secret) {
+  const value = String(secret || "");
+  if (value.length <= 8) return value ? "****" : "";
+  return `${value.slice(0, 4)}${"*".repeat(Math.min(8, value.length - 8))}${value.slice(-4)}`;
+}
+
+function profileFilePath(reportsDir) {
+  return path.join(reportsDir, "profile.json");
+}
+
+function persistProfile(userStore) {
+  try {
+    fs.writeFileSync(profileFilePath(userStore.reportsDir), JSON.stringify(userStore.profile, null, 2));
+  } catch (e) {
+    // Non-fatal: profile still works for the lifetime of this process.
+  }
+}
+
+function loadPersistedProfile(reportsDir) {
+  try {
+    return JSON.parse(fs.readFileSync(profileFilePath(reportsDir), "utf-8"));
+  } catch (e) {
+    return null;
+  }
+}
+
+function getUserId(req) {
+  // express-session's default MemoryStore does not survive a process
+  // restart (a dev-server reload, a redeploy, a crash) -- every active
+  // Google-authenticated visitor would silently fall back to a brand new
+  // guest identity and appear to lose their saved profile/API key. The
+  // long-lived fg_google_sub cookie survives restarts, so prefer the live
+  // session when we have it but fall back to the cookie rather than guest.
+  if (req.session && req.session.googleUser && req.session.googleUser.sub) {
+    return `google-${req.session.googleUser.sub}`;
+  }
+  if (req.cookies && req.cookies.fg_google_sub) {
+    return `google-${req.cookies.fg_google_sub}`;
+  }
+  return `guest-${(req.cookies && req.cookies.fg_guest_id) || "anonymous"}`;
+}
+
+function getUserStoreById(id) {
+  if (!userStores.has(id)) {
+    const reportsDir = path.join(config.reportsDir, safeDirName(id));
+    fs.mkdirSync(reportsDir, { recursive: true });
+    // A dev-server restart (nodemon) or process redeploy would otherwise wipe
+    // every profile back to defaults, silently losing saved API keys.
+    const persisted = loadPersistedProfile(reportsDir);
+    userStores.set(id, {
+      id,
+      profile: Object.assign(defaultProfile(), persisted || {}),
+      latestReviewContext: null,
+      reviewHistory: [],
+      uploadedMonthlyData: {},
+      reportsDir
+    });
+  }
+  return userStores.get(id);
+}
+
+function getUserStore(req) {
+  return getUserStoreById(getUserId(req));
+}
+
+router.use((req, res, next) => {
+  req.userStore = getUserStore(req);
+  next();
+});
+
 const oauthStateStore = new Map();
+
+const csvUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }
+});
 
 function hasZohoOAuthConfig() {
   return Boolean(config.zohoOauthClientId && config.zohoOauthClientSecret && config.zohoOauthRedirectUri);
@@ -61,14 +168,14 @@ function parsePeriod(reportId) {
   return match ? match[1] : null;
 }
 
-function listReportFiles() {
-  if (!fs.existsSync(config.reportsDir)) return [];
+function listReportFiles(reportsDir) {
+  if (!fs.existsSync(reportsDir)) return [];
 
   return fs
-    .readdirSync(config.reportsDir)
+    .readdirSync(reportsDir)
     .filter((name) => name.endsWith("-report.json"))
     .map((name) => {
-      const fullPath = path.resolve(config.reportsDir, name);
+      const fullPath = path.resolve(reportsDir, name);
       const stat = fs.statSync(fullPath);
       return {
         name,
@@ -208,6 +315,30 @@ function buildAnomalies(detections) {
     });
   });
 
+  (detections.overdueReceivables || []).forEach((r) => {
+    items.push({
+      type: "overdue_receivable",
+      severity: "high",
+      description: `${r.customer || "Customer"} invoice overdue for ${formatMoney(r.amount)}${r.dueDate ? ` (due ${r.dueDate})` : ""}`
+    });
+  });
+
+  (detections.overduePayables || []).forEach((p) => {
+    items.push({
+      type: "overdue_payable",
+      severity: "medium",
+      description: `${p.vendor || "Vendor"} bill overdue for ${formatMoney(p.amount)}${p.dueDate ? ` (due ${p.dueDate})` : ""}`
+    });
+  });
+
+  (detections.missingReceipts || []).forEach((tx) => {
+    items.push({
+      type: "missing_documentation",
+      severity: "low",
+      description: `Expense missing a receipt: ${formatMoney(tx.amount)} (${tx.counterparty || tx.description || "unknown"})`
+    });
+  });
+
   return items;
 }
 
@@ -337,10 +468,10 @@ function periodToComparable(period) {
   return Number(`${match[1]}${match[2]}`);
 }
 
-function buildRevenueSummary(monthlyData, period) {
+function buildRevenueSummary(monthlyData, period, reviewHistory) {
   const totalRevenue = toNumber(monthlyData.statements?.cashFlow?.inflow);
 
-  const historyRows = reviewHistory
+  const historyRows = (reviewHistory || [])
     .filter((row) => row.period && row.revenue != null)
     .concat([{ period, revenue: totalRevenue }])
     .sort((a, b) => (periodToComparable(a.period) || 0) - (periodToComparable(b.period) || 0));
@@ -393,7 +524,13 @@ function buildCashFlowSummary(analysis, monthlyData) {
   const cashFlow = monthlyData.statements?.cashFlow || {};
   const risk = analysis.cashFlowRisk || {};
   const runwayDays = risk.runwayMonths == null ? null : Math.round(risk.runwayMonths * 30);
-  const overdueEstimate = Math.max(0, Math.round(Math.abs(toNumber(risk.netCashFlow, 0)) * 0.35));
+  // Real overdue amount (from Zoho invoice balance/due_date) when available;
+  // falls back to a rough estimate for data sources with no receivables detail
+  // (mock data, CSV imports).
+  const hasRealOverdueData = Array.isArray(monthlyData.receivables);
+  const overdueReceivables = hasRealOverdueData
+    ? Math.round(toNumber(risk.overdueReceivablesTotal, 0))
+    : Math.max(0, Math.round(Math.abs(toNumber(risk.netCashFlow, 0)) * 0.35));
 
   return {
     cash_runway: runwayDays,
@@ -405,7 +542,7 @@ function buildCashFlowSummary(analysis, monthlyData) {
     liquidity_ratio: toNumber(monthlyData.statements?.balanceSheet?.cashAndEquivalents) > 0 && toNumber(cashFlow.outflow) > 0
       ? (toNumber(monthlyData.statements.balanceSheet.cashAndEquivalents) / toNumber(cashFlow.outflow)).toFixed(2)
       : "—",
-    overdue_receivables: overdueEstimate,
+    overdue_receivables: overdueReceivables,
     findings: (analysis.earlyWarnings || []).map((warning) => ({ severity: "medium", description: warning })),
     recommendations: [
       "Follow up invoices older than 30 days.",
@@ -463,7 +600,7 @@ function buildHealthSummary({ cashflow, revenue, vendors, customers, anomalies }
   };
 }
 
-function buildContext({ month, monthlyData, analysis, report, followUp }) {
+function buildContext({ month, monthlyData, analysis, report, followUp, reviewHistory }) {
   const period = month || monthlyData.period || report.period || new Date().toISOString().slice(0, 7);
   const anomalies = {
     items: buildAnomalies(analysis.detections || {}),
@@ -472,7 +609,7 @@ function buildContext({ month, monthlyData, analysis, report, followUp }) {
   const cashflow = buildCashFlowSummary(analysis, monthlyData);
   const vendors = buildVendorSummary(monthlyData);
   const customers = buildCustomerSummary(monthlyData);
-  const revenue = buildRevenueSummary(monthlyData, period);
+  const revenue = buildRevenueSummary(monthlyData, period, reviewHistory);
   const health = buildHealthSummary({ cashflow, revenue, vendors, customers, anomalies });
 
   const actionItems = Array.isArray(followUp?.actions)
@@ -517,14 +654,14 @@ function buildContext({ month, monthlyData, analysis, report, followUp }) {
   };
 }
 
-function contextFromLatestReportDisk() {
-  const files = listReportFiles();
+function contextFromLatestReportDisk(reportsDir) {
+  const files = listReportFiles(reportsDir);
   if (!files.length) return null;
 
   const latest = files[0];
   const report = JSON.parse(fs.readFileSync(latest.fullPath, "utf-8"));
   const reportPrefix = latest.name.replace(/-report\.json$/, "");
-  const actionsCsv = path.resolve(config.reportsDir, `${reportPrefix}-actions.csv`);
+  const actionsCsv = path.resolve(reportsDir, `${reportPrefix}-actions.csv`);
   const actions = parseActionsCsv(actionsCsv);
 
   const runwayMonths = toNumber(report.risk?.runwayMonths, 0);
@@ -608,10 +745,10 @@ function contextFromLatestReportDisk() {
   };
 }
 
-function getContext() {
-  if (latestReviewContext) return latestReviewContext;
-  latestReviewContext = contextFromLatestReportDisk();
-  return latestReviewContext;
+function getContext(req) {
+  if (req.userStore.latestReviewContext) return req.userStore.latestReviewContext;
+  req.userStore.latestReviewContext = contextFromLatestReportDisk(req.userStore.reportsDir);
+  return req.userStore.latestReviewContext;
 }
 
 /* ============================================================
@@ -844,9 +981,154 @@ router.get("/health", (req, res) => {
   res.json({ ok: true, service: "ai-financial-controller", now: new Date().toISOString() });
 });
 
+router.get("/auth/session", (req, res) => {
+  let googleUser = req.session && req.session.googleUser;
+
+  // Session lost (e.g. server restarted) but the persistent cookie still
+  // identifies this browser as a known Google user -- reconstruct their
+  // display info from the profile we saved at login instead of silently
+  // demoting them to a guest.
+  if (!googleUser && req.cookies && req.cookies.fg_google_sub) {
+    const store = getUserStoreById(`google-${req.cookies.fg_google_sub}`);
+    if (store.profile.googleSub) {
+      googleUser = {
+        sub: store.profile.googleSub,
+        name: store.profile.googleName,
+        email: store.profile.googleEmail,
+        picture: store.profile.googlePicture
+      };
+      req.session.googleUser = googleUser;
+    }
+  }
+
+  const authenticated = Boolean(googleUser);
+  res.json({
+    ok: true,
+    google_enabled: config.enableGoogleAuth,
+    authenticated,
+    user: authenticated
+      ? {
+        sub: googleUser.sub,
+        name: googleUser.name || null,
+        email: googleUser.email || null,
+        picture: googleUser.picture || null
+      }
+      : null
+  });
+});
+
+const googleOauthStateStore = new Map();
+
+router.get("/auth/google/start", (req, res) => {
+  if (!config.enableGoogleAuth) {
+    return res.redirect("/app?auth=not_configured");
+  }
+
+  const now = Date.now();
+  for (const [key, value] of googleOauthStateStore.entries()) {
+    if (!value || value.expiresAt < now) googleOauthStateStore.delete(key);
+  }
+
+  const state = crypto.randomBytes(16).toString("hex");
+  googleOauthStateStore.set(state, { expiresAt: now + 10 * 60 * 1000 });
+
+  return res.redirect(googleAuth.buildAuthUrl(state));
+});
+
+router.get("/auth/google/callback", async (req, res) => {
+  const { code, state, error } = req.query || {};
+
+  if (error) {
+    return res.redirect(`/app?auth=error&reason=${encodeURIComponent(String(error))}`);
+  }
+  if (!code || !state || !googleOauthStateStore.has(state)) {
+    return res.redirect("/app?auth=error&reason=invalid_state");
+  }
+  googleOauthStateStore.delete(state);
+
+  try {
+    const tokens = await googleAuth.exchangeCodeForTokens(String(code));
+    const profile = await googleAuth.fetchUserInfo(tokens.access_token);
+
+    req.session.googleUser = profile;
+    // req.userStore was already resolved by the router-level middleware using
+    // whatever identity this request arrived with (a guest, most likely) --
+    // fetch/create the REAL google-scoped store directly so login info lands
+    // in the right place, and set a persistent cookie so this identity
+    // survives a lost session (see getUserId).
+    const googleStore = getUserStoreById(`google-${profile.sub}`);
+    googleStore.profile.googleSub = profile.sub;
+    googleStore.profile.googleName = profile.name || "";
+    googleStore.profile.googleEmail = profile.email || "";
+    googleStore.profile.googlePicture = profile.picture || "";
+    persistProfile(googleStore);
+
+    res.cookie("fg_google_sub", profile.sub, {
+      maxAge: 400 * 24 * 60 * 60 * 1000,
+      httpOnly: true,
+      sameSite: "lax"
+    });
+
+    return res.redirect("/app?auth=success");
+  } catch (exchangeError) {
+    return res.redirect(`/app?auth=error&reason=${encodeURIComponent(exchangeError.message || "google_auth_failed")}`);
+  }
+});
+
+router.get("/auth/google/logout", (req, res) => {
+  if (req.session) req.session.googleUser = null;
+  res.clearCookie("fg_google_sub");
+  res.redirect("/app");
+});
+
+router.post("/financial-data/upload", csvUpload.single("file"), (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ ok: false, error: "No file uploaded. Attach a CSV file." });
+    }
+
+    const period = String((req.body || {}).period || "").trim();
+    if (!/^\d{4}-\d{2}$/.test(period)) {
+      return res.status(400).json({ ok: false, error: "A valid period (YYYY-MM) is required." });
+    }
+
+    const currentCashBalance = (req.body || {}).currentCashBalance;
+    const csvText = req.file.buffer.toString("utf-8");
+
+    const monthlyData = parseFinancialCsv({
+      csvText,
+      period,
+      businessName: req.userStore.profile.businessName,
+      currentCashBalance
+    });
+
+    req.userStore.uploadedMonthlyData[period] = monthlyData;
+
+    return res.json({
+      ok: true,
+      period,
+      summary: {
+        transaction_count: monthlyData.transactions.length,
+        skipped_rows: monthlyData.meta.skippedRows,
+        inflow: monthlyData.statements.cashFlow.inflow,
+        outflow: monthlyData.statements.cashFlow.outflow,
+        net_income: monthlyData.statements.profitAndLoss.netIncome,
+        cash_and_equivalents: monthlyData.statements.balanceSheet.cashAndEquivalents
+      }
+    });
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error.message });
+  }
+});
+
+router.get("/financial-data/uploads", (req, res) => {
+  const periods = Object.keys(req.userStore.uploadedMonthlyData).sort().reverse();
+  res.json({ ok: true, periods });
+});
+
 router.get("/oauth/zoho/start", (req, res) => {
   if (!hasZohoOAuthConfig()) {
-    return res.redirect("/?oauth=not_configured");
+    return res.redirect("/app?oauth=not_configured");
   }
 
   cleanupOauthState();
@@ -875,11 +1157,11 @@ router.get("/oauth/zoho/callback", async (req, res) => {
   const { code, state, error } = req.query || {};
 
   if (error) {
-    return res.redirect(`/?oauth=error&reason=${encodeURIComponent(String(error))}`);
+    return res.redirect(`/app?oauth=error&reason=${encodeURIComponent(String(error))}`);
   }
 
   if (!code || !state || !oauthStateStore.has(state)) {
-    return res.redirect("/?oauth=error&reason=invalid_state");
+    return res.redirect("/app?oauth=error&reason=invalid_state");
   }
 
   const pendingProfile = oauthStateStore.get(state);
@@ -905,52 +1187,71 @@ router.get("/oauth/zoho/callback", async (req, res) => {
     const tokenData = await tokenResponse.json();
     if (!tokenResponse.ok || tokenData.error || !tokenData.access_token) {
       const reason = tokenData.error || `token_exchange_${tokenResponse.status}`;
-      return res.redirect(`/?oauth=error&reason=${encodeURIComponent(String(reason))}`);
+      return res.redirect(`/app?oauth=error&reason=${encodeURIComponent(String(reason))}`);
     }
 
-    memoryProfile.zohoApiKey = tokenData.access_token;
-    memoryProfile.zohoRefreshToken = tokenData.refresh_token || memoryProfile.zohoRefreshToken;
+    req.userStore.profile.zohoApiKey = tokenData.access_token;
+    req.userStore.profile.zohoRefreshToken = tokenData.refresh_token || req.userStore.profile.zohoRefreshToken;
+    req.userStore.profile.zohoTokenExpiresAt = Date.now() + (Number(tokenData.expires_in) || 3600) * 1000;
+    if (tokenData.api_domain) req.userStore.profile.zohoApiDomain = tokenData.api_domain;
 
-    if (pendingProfile?.name) memoryProfile.userName = pendingProfile.name;
-    if (pendingProfile?.businessName) memoryProfile.businessName = pendingProfile.businessName;
-    if (pendingProfile?.zohoOrgId) memoryProfile.zohoOrgId = pendingProfile.zohoOrgId;
+    if (pendingProfile?.name) req.userStore.profile.userName = pendingProfile.name;
+    if (pendingProfile?.businessName) req.userStore.profile.businessName = pendingProfile.businessName;
+    if (pendingProfile?.zohoOrgId) req.userStore.profile.zohoOrgId = pendingProfile.zohoOrgId;
 
-    return res.redirect("/?oauth=success");
+    persistProfile(req.userStore);
+    return res.redirect("/app?oauth=success");
   } catch (exchangeError) {
-    return res.redirect(`/?oauth=error&reason=${encodeURIComponent(exchangeError.message || "token_exchange_failed")}`);
+    return res.redirect(`/app?oauth=error&reason=${encodeURIComponent(exchangeError.message || "token_exchange_failed")}`);
   }
 });
 
+router.post("/oauth/zoho/disconnect", (req, res) => {
+  req.userStore.profile.zohoApiKey = "";
+  req.userStore.profile.zohoRefreshToken = "";
+  req.userStore.profile.zohoOrgId = "";
+  req.userStore.profile.zohoApiDomain = "";
+  req.userStore.profile.zohoTokenExpiresAt = null;
+  persistProfile(req.userStore);
+  res.json({ ok: true });
+});
+
 router.get("/profile", (req, res) => {
-  const zohoConnected = Boolean(memoryProfile.zohoApiKey || config.zohoDirectApiUrl);
+  const zohoConnected = Boolean(req.userStore.profile.zohoApiKey || config.zohoDirectApiUrl);
   const zohoState = zohoConnected ? "configured" : "not configured";
-  const walletConnected = Boolean(memoryProfile.walletAddress);
-  const aiConnected = Boolean(memoryProfile.aiApiKey);
+  const walletConnected = Boolean(req.userStore.profile.walletAddress);
+  const aiConnected = Boolean(req.userStore.profile.aiApiKey);
 
   res.json({
     ok: true,
     profile: {
-      businessName: memoryProfile.businessName,
-      userName: memoryProfile.userName,
-      business_name: memoryProfile.businessName,
-      name: memoryProfile.userName,
+      businessName: req.userStore.profile.businessName,
+      userName: req.userStore.profile.userName,
+      business_name: req.userStore.profile.businessName,
+      name: req.userStore.profile.userName,
       zoho_connected: zohoConnected,
       zoho_oauth_configured: hasZohoOAuthConfig(),
-      zoho_org_id: memoryProfile.zohoOrgId,
-      wallet_address: memoryProfile.walletAddress,
-      zoho_api_key: memoryProfile.zohoApiKey ? "***" : "",
-      ai_provider: memoryProfile.aiProvider,
-      ai_assistant: memoryProfile.aiAssistant,
-      ai_api_key: memoryProfile.aiApiKey ? "***" : "",
+      zoho_org_id: req.userStore.profile.zohoOrgId,
+      wallet_address: req.userStore.profile.walletAddress,
+      wallet_verified: Boolean(req.userStore.profile.walletVerified),
+      wallet_chain_id: req.userStore.profile.walletChainId,
+      zoho_api_key: req.userStore.profile.zohoApiKey ? MASKED_VALUE : "",
+      ai_provider: req.userStore.profile.aiProvider,
+      ai_assistant: req.userStore.profile.aiAssistant,
+      ai_api_key: req.userStore.profile.aiApiKey ? MASKED_VALUE : "",
+      ai_api_key_configured: Boolean(req.userStore.profile.aiApiKey),
+      ai_api_key_preview: maskSecretPreview(req.userStore.profile.aiApiKey),
       businessAddress: config.businessAddress,
       ownerKeywordHints: config.businessOwnerKeywords,
       integrations: [
         {
-          label: "Avalanche Address",
+          label: "Avalanche Wallet",
           connected: walletConnected,
-          state: walletConnected ? "connected" : "not connected",
+          state: req.userStore.profile.walletVerified ? "verified" : (walletConnected ? "unverified" : "not connected"),
           secureReference: "***",
-          note: walletConnected ? "Avalanche wallet address is linked" : "No Avalanche wallet linked"
+          note: req.userStore.profile.walletVerified
+            ? "Wallet ownership verified by signature"
+            : (walletConnected ? "Wallet address set but not signature-verified" : "No wallet connected")
         },
         {
           label: "Zoho API",
@@ -973,7 +1274,7 @@ router.get("/profile", (req, res) => {
           connected: aiConnected,
           state: aiConnected ? "configured" : "not configured",
           secureReference: "***",
-          note: `Assistant: ${memoryProfile.aiAssistant} (${memoryProfile.aiProvider})`
+          note: `Assistant: ${req.userStore.profile.aiAssistant} (${req.userStore.profile.aiProvider})`
         },
         getCoreWalletIntegrationSummary()
       ]
@@ -1011,55 +1312,142 @@ router.post("/profile", (req, res) => {
   const resolvedAiApiKey = aiApiKey || ai_api_key;
   const resolvedAiAssistant = aiAssistant || ai_assistant;
 
-  if (resolvedName) memoryProfile.userName = resolvedName;
-  if (resolvedBusinessName) memoryProfile.businessName = resolvedBusinessName;
-  if (resolvedZoho) memoryProfile.zohoApiKey = resolvedZoho;
-  if (resolvedZohoOrgId) memoryProfile.zohoOrgId = resolvedZohoOrgId;
-  if (resolvedWallet !== undefined) memoryProfile.walletAddress = resolvedWallet;
-  if (resolvedAiProvider) memoryProfile.aiProvider = resolvedAiProvider;
-  if (resolvedAiApiKey) memoryProfile.aiApiKey = resolvedAiApiKey;
-  if (resolvedAiAssistant) memoryProfile.aiAssistant = resolvedAiAssistant;
+  if (resolvedName) req.userStore.profile.userName = resolvedName;
+  if (resolvedBusinessName) req.userStore.profile.businessName = resolvedBusinessName;
+  // GET /profile echoes "***" for any already-set secret so it never leaves
+  // the server in the clear. If the client sends that same sentinel back
+  // (e.g. it round-tripped an unmodified form field), treat it as "unchanged"
+  // rather than overwriting the real secret with the literal string "***".
+  if (resolvedZoho && resolvedZoho !== MASKED_VALUE) req.userStore.profile.zohoApiKey = resolvedZoho;
+  if (resolvedZohoOrgId) req.userStore.profile.zohoOrgId = resolvedZohoOrgId;
+  if (resolvedWallet !== undefined && resolvedWallet !== req.userStore.profile.walletAddress) {
+    req.userStore.profile.walletAddress = resolvedWallet;
+    req.userStore.profile.walletVerified = false;
+    req.userStore.profile.walletChainId = null;
+  }
+  if (resolvedAiProvider) req.userStore.profile.aiProvider = resolvedAiProvider;
+  if (resolvedAiApiKey && resolvedAiApiKey !== MASKED_VALUE) req.userStore.profile.aiApiKey = resolvedAiApiKey;
+  if (resolvedAiAssistant) req.userStore.profile.aiAssistant = resolvedAiAssistant;
+  persistProfile(req.userStore);
   res.json({ ok: true });
 });
 
 router.post("/monthly-review", async (req, res) => {
   try {
-    const { month, directApiUrl, apiKey, businessName, businessAddress } = req.body || {};
+    const { month, directApiUrl, apiKey, businessName, businessAddress, use_ai_analysis } = req.body || {};
 
-    const monthlyData = await fetchMonthlyData({ 
-      directApiUrl, 
-      apiKey: apiKey || memoryProfile.zohoApiKey, 
-      month 
-    });
-    
+    const uploaded = month ? req.userStore.uploadedMonthlyData[month] : null;
+    let monthlyData;
+
+    if (uploaded) {
+      monthlyData = uploaded;
+    } else if (req.userStore.profile.zohoRefreshToken) {
+      // Real Zoho Books OAuth connection on file -- pull actual data.
+      try {
+        monthlyData = await zohoBooksClient.fetchMonthlyDataFromZoho(req.userStore.profile, month);
+      } catch (zohoError) {
+        return res.status(502).json({
+          ok: false,
+          error: "zoho_fetch_failed",
+          message: zohoError.message || "Could not fetch data from Zoho Books."
+        });
+      }
+    } else {
+      monthlyData = await fetchMonthlyData({
+        directApiUrl,
+        apiKey: apiKey || req.userStore.profile.zohoApiKey,
+        month
+      });
+    }
+
     const analysis = analyzeFinancialRisk(monthlyData);
 
     const report = buildStructuredReport({
-      businessName: businessName || memoryProfile.businessName,
+      businessName: businessName || req.userStore.profile.businessName,
       businessAddress: businessAddress || config.businessAddress,
       period: month || monthlyData.period || null,
       analysis
     });
 
-    const followUp = await runFollowUpWorkflow(report);
+    const followUp = await runFollowUpWorkflow(report, req.userStore.reportsDir);
 
     const context = buildContext({
       month,
       monthlyData,
       analysis,
       report,
-      followUp
+      followUp,
+      reviewHistory: req.userStore.reviewHistory
     });
-    latestReviewContext = context;
+    context.rawMonthlyData = monthlyData;
+    context.rawAnalysis = analysis;
+    req.userStore.latestReviewContext = context;
 
-    reviewHistory.push({ period: context.period, revenue: context.revenue.total_revenue });
-    if (reviewHistory.length > 36) reviewHistory.shift();
+    const resolvedAiKey = req.userStore.profile.aiApiKey || "";
+    const shouldUseAi = use_ai_analysis !== false;
+    let aiAnalysis = {
+      ok: false,
+      mode: "skills-only",
+      reason: "ai_not_requested"
+    };
+
+    if (shouldUseAi) {
+      if (resolvedAiKey) {
+        // The deterministic skill engine above (riskEngine.js + buildContext)
+        // has already computed every number for this month. The AI only
+        // interprets and narrates it -- explaining, prioritizing, and giving
+        // it founder-friendly voice -- it never recomputes or overrides it.
+        const aiResult = await generateAiInterpretation({
+          apiKey: resolvedAiKey,
+          provider: req.userStore.profile.aiProvider,
+          businessName: businessName || req.userStore.profile.businessName,
+          period: context.period,
+          skillOutputs: {
+            health: context.health,
+            cashflow: context.cashflow,
+            revenue: context.revenue,
+            risk: context.anomalies,
+            vendors: context.vendors,
+            customers: context.customers,
+            actions: context.actions
+          }
+        });
+
+        if (aiResult.ok) {
+          req.userStore.latestReviewContext.aiInsights = aiResult.output;
+
+          aiAnalysis = {
+            ok: true,
+            mode: "ai+skills",
+            provider: aiResult.provider,
+            model: aiResult.model,
+            insights: aiResult.output
+          };
+        } else {
+          aiAnalysis = {
+            ok: false,
+            mode: "skills-fallback",
+            reason: aiResult.reason || "ai_request_failed"
+          };
+        }
+      } else {
+        aiAnalysis = {
+          ok: false,
+          mode: "skills-fallback",
+          reason: "missing_ai_api_key"
+        };
+      }
+    }
+
+    req.userStore.reviewHistory.push({ period: context.period, revenue: context.revenue.total_revenue });
+    if (req.userStore.reviewHistory.length > 36) req.userStore.reviewHistory.shift();
 
     res.json({
       ok: true,
       report,
       followUp,
       review: context.overview,
+      aiAnalysis,
       assumptions: [
         "Zoho endpoint returns normalized JSON fields: transactions, journalEntries, reconciliations, statements.",
         "Authentication can be passed as Bearer token from apiKey or ZOHO_API_KEY.",
@@ -1072,49 +1460,84 @@ router.post("/monthly-review", async (req, res) => {
 });
 
 router.get("/health-score", (req, res) => {
-  const context = getContext();
+  const context = getContext(req);
   if (!context) return res.json({ ok: false, error: "Run monthly review first." });
-  res.json({ ok: true, health: context.health, skills: ["financial-health-scorer"] });
+  res.json({
+    ok: true,
+    health: context.health,
+    skills: ["financial-health-scorer"],
+    ai_insights: context.aiInsights?.pages?.financial_health || null
+  });
 });
 
 router.get("/cashflow", (req, res) => {
-  const context = getContext();
+  const context = getContext(req);
   if (!context) return res.json({ ok: false, error: "Run monthly review first." });
-  res.json({ ok: true, cashflow: context.cashflow, skills: ["cashflow-risk-analyzer"] });
+  res.json({
+    ok: true,
+    cashflow: context.cashflow,
+    skills: ["cashflow-risk-analyzer"],
+    ai_insights: context.aiInsights?.pages?.cashflow || null
+  });
 });
 
 router.get("/revenue", (req, res) => {
-  const context = getContext();
+  const context = getContext(req);
   if (!context) return res.json({ ok: false, error: "Run monthly review first." });
-  res.json({ ok: true, revenue: context.revenue, skills: ["revenue-intelligence"] });
+  res.json({
+    ok: true,
+    revenue: context.revenue,
+    skills: ["revenue-intelligence"],
+    ai_insights: context.aiInsights?.pages?.revenue || null
+  });
 });
 
 router.get("/anomalies", (req, res) => {
-  const context = getContext();
+  const context = getContext(req);
   if (!context) return res.json({ ok: false, error: "Run monthly review first." });
-  res.json({ ok: true, anomalies: context.anomalies, skills: ["fraud-and-errors-detector"] });
+  res.json({
+    ok: true,
+    anomalies: context.anomalies,
+    skills: ["fraud-and-errors-detector"],
+    ai_insights: context.aiInsights?.pages?.risk || null
+  });
 });
 
 router.get("/vendors", (req, res) => {
-  const context = getContext();
+  const context = getContext(req);
   if (!context) return res.json({ ok: false, error: "Run monthly review first." });
-  res.json({ ok: true, vendors: context.vendors, skills: ["vendor-dependency-detector"] });
+  res.json({
+    ok: true,
+    vendors: context.vendors,
+    skills: ["vendor-dependency-detector"],
+    ai_insights: context.aiInsights?.pages?.vendors || null
+  });
 });
 
 router.get("/customers", (req, res) => {
-  const context = getContext();
+  const context = getContext(req);
   if (!context) return res.json({ ok: false, error: "Run monthly review first." });
-  res.json({ ok: true, customers: context.customers, skills: ["customer-concentration-detector", "revenue-intelligence"] });
+  res.json({
+    ok: true,
+    customers: context.customers,
+    skills: ["customer-concentration-detector", "revenue-intelligence"],
+    ai_insights: context.aiInsights?.pages?.customers || null
+  });
 });
 
 router.get("/actions", (req, res) => {
-  const context = getContext();
+  const context = getContext(req);
   if (!context) return res.json({ ok: false, error: "Run monthly review first." });
-  res.json({ ok: true, actions: context.actions.actions, skills: ["followup-orchestrator", "recommendation-engine"] });
+  res.json({
+    ok: true,
+    actions: context.actions.actions,
+    skills: ["followup-orchestrator", "recommendation-engine"],
+    ai_insights: context.aiInsights?.pages?.actions || null
+  });
 });
 
 router.post("/executive-report", (req, res) => {
-  const context = getContext();
+  const context = getContext(req);
   if (!context) return res.json({ ok: false, error: "Run monthly review first." });
 
   const reportType = String(req.body?.report_type || "monthly_review");
@@ -1146,14 +1569,36 @@ router.post("/executive-report", (req, res) => {
     ]
   };
 
-  const lines = (templates[reportType] || templates.monthly_review)
+  let lines = (templates[reportType] || templates.monthly_review)
     .concat(topFindings.length ? ["", "Top Findings:", ...topFindings] : ["", "Top Findings:", "- No critical findings."])
     .concat(topActions.length ? ["", "Action Center:", ...topActions] : ["", "Action Center:", "- No pending actions."]);
+
+  const execInsights = context.aiInsights?.executive_report;
+  if (execInsights) {
+    lines = lines.concat([
+      "",
+      "=== AI Executive Insights ===",
+      execInsights.executive_summary || "",
+      "",
+      execInsights.key_insights?.length ? "Key Insights:" : "",
+      ...(execInsights.key_insights || []).map((item) => `- ${item}`),
+      "",
+      execInsights.what_is_working?.length ? "What's Working:" : "",
+      ...(execInsights.what_is_working || []).map((item) => `- ${item}`),
+      "",
+      execInsights.what_needs_attention?.length ? "What Needs Attention:" : "",
+      ...(execInsights.what_needs_attention || []).map((item) => `- ${item}`),
+      "",
+      execInsights.priority_actions?.length ? "Priority Actions:" : "",
+      ...(execInsights.priority_actions || []).map((item) => `${item.rank}. ${item.action} -- ${item.why}`)
+    ].filter((line) => line !== ""));
+  }
 
   res.json({
     ok: true,
     report_type: reportType,
     report: lines.join("\n"),
+    ai_generated: Boolean(execInsights),
     channels: ["PDF", "CSV", "Email"],
     skills: ["executive-report-generator", "financial-controller-core"]
   });
@@ -1173,15 +1618,86 @@ router.post("/chat", async (req, res) => {
       return now.getUTCFullYear() + "-" + String(now.getUTCMonth() + 1).padStart(2, "0");
     })();
 
-    /* Fetch data and run analysis for conversational context */
-    const monthlyData = await fetchMonthlyData({ month: targetMonth });
-    const analysis = analyzeFinancialRisk(monthlyData);
+    /* Reuse the same real data (uploaded CSV / real Zoho / mock) already shown
+       on the dashboard for this month instead of re-fetching mock data blind. */
+    const cachedContext = req.userStore.latestReviewContext;
+    let monthlyData;
+    let analysis;
+    let chatContext;
+
+    if (cachedContext && cachedContext.period === targetMonth && cachedContext.rawAnalysis) {
+      monthlyData = cachedContext.rawMonthlyData;
+      analysis = cachedContext.rawAnalysis;
+      // Ground chat in whatever is already on the dashboard for this month --
+      // AI-computed numbers when an AI key is configured, deterministic
+      // skill-engine numbers otherwise. Never a second, possibly-divergent copy.
+      chatContext = cachedContext;
+    } else {
+      const uploaded = req.userStore.uploadedMonthlyData[targetMonth];
+      if (uploaded) {
+        monthlyData = uploaded;
+      } else if (req.userStore.profile.zohoRefreshToken) {
+        monthlyData = await zohoBooksClient.fetchMonthlyDataFromZoho(req.userStore.profile, targetMonth);
+      } else {
+        monthlyData = await fetchMonthlyData({ month: targetMonth });
+      }
+      analysis = analyzeFinancialRisk(monthlyData);
+      chatContext = buildContext({
+        month: targetMonth,
+        monthlyData,
+        analysis,
+        report: {},
+        followUp: {},
+        reviewHistory: req.userStore.reviewHistory
+      });
+    }
+
+    const resolvedProvider = ai_provider || req.userStore.profile.aiProvider;
+    const resolvedAssistant = ai_assistant || req.userStore.profile.aiAssistant;
+    const resolvedAiKey = req.userStore.profile.aiApiKey || "";
+    let aiFailureReason = null;
+
+    if (resolvedAiKey) {
+      const aiChat = await generateAiChatResponse({
+        apiKey: resolvedAiKey,
+        provider: resolvedProvider,
+        assistant: resolvedAssistant,
+        month: targetMonth,
+        context: chatContext,
+        message
+      });
+
+      if (aiChat.ok && aiChat.text) {
+        return res.json({
+          ok: true,
+          intent: "ai_generated",
+          reply: aiChat.text,
+          text: aiChat.text,
+          html: `<p>${escapeHtml(aiChat.text).replace(/\n/g, "<br>")}</p><p class=\"text-sm text-muted\" style=\"margin-top:0.75rem\">Assistant: <strong>${escapeHtml(resolvedAssistant)}</strong> via <strong>${escapeHtml(aiChat.provider)}</strong> · AI + skills context</p>`,
+          suggestions: [
+            "Show risk summary for this month",
+            "What are the top 3 actions this week?",
+            "Explain cash flow risk in plain terms"
+          ],
+          hint: "AI-powered response with skills context.",
+          context: {
+            month: targetMonth,
+            assistant: resolvedAssistant,
+            provider: aiChat.provider,
+            model: aiChat.model,
+            mode: "ai+skills"
+          }
+        });
+      }
+
+      aiFailureReason = aiChat.reason || "ai_request_failed";
+    }
 
     /* Classify intent and build response */
     const intent = classifyIntent(message);
     const response = buildChatResponse(intent, analysis, targetMonth, {
-      provider: ai_provider || memoryProfile.aiProvider,
-      assistant: ai_assistant || memoryProfile.aiAssistant
+      provider: resolvedProvider,
+      assistant: resolvedAssistant
     });
 
     res.json({
@@ -1194,9 +1710,10 @@ router.post("/chat", async (req, res) => {
       hint: "Ask me about cash flow, risks, anomalies, or expenses.",
       context: {
         month: targetMonth,
-        assistant: ai_assistant || memoryProfile.aiAssistant,
-        provider: ai_provider || memoryProfile.aiProvider,
-        mode: "skills-first"
+        assistant: resolvedAssistant,
+        provider: resolvedProvider,
+        mode: "skills-first",
+        ai_error: aiFailureReason
       }
     });
   } catch (error) {
@@ -1220,7 +1737,7 @@ router.post("/avalanche/contracts/deploy", async (req, res) => {
       address: result?.deployment?.address || "",
       error: result.ok ? "" : (result.error || "unknown_error"),
       message: result.message || "",
-      actor: memoryProfile.userName || "unknown"
+      actor: req.userStore.profile.userName || "unknown"
     });
 
     const statusCode = result.ok ? 200 : 400;
@@ -1239,7 +1756,7 @@ router.post("/avalanche/contracts/deploy", async (req, res) => {
       address: "",
       error: "deploy_failed",
       message: error.message,
-      actor: memoryProfile.userName || "unknown"
+      actor: req.userStore.profile.userName || "unknown"
     });
 
     return res.status(500).json({
@@ -1258,6 +1775,78 @@ router.get("/avalanche/contracts/deployments", (req, res) => {
   const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 25));
   const items = listDeploymentRecords(limit);
   return res.json({ ok: true, items, count: items.length });
+});
+
+router.get("/avalanche/networks", (req, res) => {
+  return res.json({ ok: true, items: Object.values(config.avalancheNetworks) });
+});
+
+router.get("/wallet/nonce", (req, res) => {
+  const address = String(req.query.address || "").trim();
+  if (!ethers.isAddress(address)) {
+    return res.status(400).json({ ok: false, error: "invalid_address" });
+  }
+  const message = createNonce(address);
+  return res.json({ ok: true, message });
+});
+
+router.post("/wallet/verify", (req, res) => {
+  const { address, signature, chainId, chain_id } = req.body || {};
+  if (!ethers.isAddress(address) || !signature) {
+    return res.status(400).json({ ok: false, error: "address and signature are required" });
+  }
+
+  const result = verifySignature(address, signature);
+  if (!result.ok) {
+    return res.status(401).json({ ok: false, error: result.error });
+  }
+
+  req.userStore.profile.walletAddress = result.address;
+  req.userStore.profile.walletVerified = true;
+  req.userStore.profile.walletChainId = Number(chainId || chain_id) || req.userStore.profile.walletChainId;
+  persistProfile(req.userStore);
+
+  return res.json({ ok: true, address: result.address, verified: true });
+});
+
+router.post("/avalanche/contracts/deployments/record", async (req, res) => {
+  const body = req.body || {};
+  const contractAddress = String(body.contractAddress || body.contract_address || "").trim();
+  const txHash = String(body.txHash || body.tx_hash || "").trim();
+  const chainId = Number(body.chainId || body.chain_id);
+  const deployerAddress = String(body.deployerAddress || body.deployer_address || "").trim();
+  const contractName = body.contractName || body.contract_name || "Contract";
+  const templateId = body.templateId || body.template_id || null;
+
+  if (!ethers.isAddress(contractAddress) || !/^0x[0-9a-fA-F]{64}$/.test(txHash) || !chainId) {
+    return res.status(400).json({
+      ok: false,
+      error: "contractAddress, txHash and chainId are required and must be valid"
+    });
+  }
+
+  const verification = await verifyDeploymentTx({ chainId, txHash, contractAddress });
+
+  appendDeploymentRecord({
+    contract_name: contractName,
+    template_id: templateId,
+    receiver_address: deployerAddress,
+    dry_run: false,
+    ok: verification.verified,
+    mode: "wallet-signed",
+    chain_id: chainId,
+    rpc_url: "",
+    tx_hash: txHash,
+    address: contractAddress,
+    error: verification.verified ? "" : (verification.reason || "unverified"),
+    message: verification.verified
+      ? "Deployment confirmed on-chain."
+      : `Could not fully verify on-chain (${verification.reason || "unknown"}). Recorded as reported by wallet.`,
+    verified: verification.verified,
+    actor: req.userStore.profile.userName || "unknown"
+  });
+
+  return res.json({ ok: true, verified: verification.verified, reason: verification.reason });
 });
 
 module.exports = router;
