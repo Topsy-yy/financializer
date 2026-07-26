@@ -5,21 +5,24 @@ services:
   - type: web
     name: finguard-ai
     runtime: node
-    plan: starter            # 'starter' supports the persistent disk below; 'free' does NOT
+    plan: free               # $0 — but sleeps when idle and has NO persistent disk
     region: frankfurt        # pick the region closest to your users
     buildCommand: npm install
     startCommand: node src/server.js
     healthCheckPath: /api/health
     autoDeploy: true
-    disk:
-      name: finguard-data
-      mountPath: /var/data   # user profiles, reports, on-chain ledger, rules
-      sizeGB: 1
+    # PRODUCTION PERSISTENCE: switch plan to 'starter' (~$7/mo), then uncomment the
+    # disk block and REPORTS_DIR below so user data survives redeploys. On 'free'
+    # the filesystem is ephemeral (data resets on restart/redeploy).
+    # disk:
+    #   name: finguard-data
+    #   mountPath: /var/data
+    #   sizeGB: 1
     envVars:
       - key: NODE_VERSION
         value: "20"
-      - key: REPORTS_DIR
-        value: /var/data
+      # - key: REPORTS_DIR     # uncomment together with the disk above
+      #   value: /var/data
       - key: MOCK_REQUIRED_INTEGRATIONS
         value: "false"
       - key: SESSION_SECRET
