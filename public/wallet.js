@@ -182,6 +182,38 @@ var FinGuardWallet = (function () {
     };
   }
 
+  /* Call any method on an already-deployed contract, signed by the browser wallet. */
+  async function callContract(contractAddress, abi, method, args, overrides) {
+    if (!state.browserProvider || !state.address) throw new Error("Connect a wallet first.");
+    var signer = await state.browserProvider.getSigner();
+    var contract = new ethers.Contract(contractAddress, abi, signer);
+    var callArgs = (args || []).slice();
+    if (overrides) callArgs.push(overrides);
+    var tx = await contract[method].apply(contract, callArgs);
+    return {
+      txHash: tx.hash,
+      wait: async function () { return await tx.wait(); }
+    };
+  }
+
+  /* Send native AVAX from the browser wallet (e.g. deposit into a treasury contract). */
+  async function sendNative(toAddress, amountEth) {
+    if (!state.browserProvider || !state.address) throw new Error("Connect a wallet first.");
+    var signer = await state.browserProvider.getSigner();
+    var tx = await signer.sendTransaction({ to: toAddress, value: ethers.parseEther(String(amountEth)) });
+    return {
+      txHash: tx.hash,
+      wait: async function () { return await tx.wait(); }
+    };
+  }
+
+  /* Read-only provider for querying chain state / receipts (no signing).
+     Uses the connected wallet's provider when available (avoids CORS), else a plain RPC. */
+  function getReadProvider(rpcUrl) {
+    if (state.browserProvider) return state.browserProvider;
+    return new ethers.JsonRpcProvider(rpcUrl);
+  }
+
   function trustServerVerification(expectedAddress) {
     if (!state.address || !expectedAddress) return false;
     if (state.address.toLowerCase() !== String(expectedAddress).toLowerCase()) return false;
@@ -217,6 +249,9 @@ var FinGuardWallet = (function () {
     switchNetwork: switchNetwork,
     getBalance: getBalance,
     deployTemplate: deployTemplate,
+    callContract: callContract,
+    sendNative: sendNative,
+    getReadProvider: getReadProvider,
     disconnect: disconnect,
     trustServerVerification: trustServerVerification,
     getState: getState,

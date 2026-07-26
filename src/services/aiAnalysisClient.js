@@ -11,6 +11,9 @@ const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 const GEMINI_DEFAULT_MODEL = "gemini-flash-latest";
 const DEEPSEEK_BASE_URL = "https://api.deepseek.com";
 const DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash";
+
+const MISTRAL_BASE_URL = "https://api.mistral.ai/v1";
+const MISTRAL_DEFAULT_MODEL = "mistral-large-latest";
 const XAI_BASE_URL = "https://api.x.ai/v1";
 const XAI_DEFAULT_MODEL = "grok-4.5";
 const NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1";
@@ -421,6 +424,22 @@ async function callChatCompletions({ apiKey, provider, prompt, temperature = 0.2
       maxTokens,
       baseUrlOverride: DEEPSEEK_BASE_URL,
       modelOverride: DEEPSEEK_DEFAULT_MODEL
+    });
+  }
+  if (normalizedProvider === "mistral") {
+    // Mistral's API is OpenAI-compatible (Bearer auth, /chat/completions shape),
+    // so it reuses the same client with a base URL + model override.
+    // Mistral Large on the free Experiment tier is slower to respond, so it
+    // gets a longer timeout than the 15s default to avoid premature aborts.
+    return callOpenAiCompatible({
+      apiKey,
+      provider,
+      prompt,
+      temperature,
+      maxTokens,
+      baseUrlOverride: MISTRAL_BASE_URL,
+      modelOverride: MISTRAL_DEFAULT_MODEL,
+      timeoutMsOverride: 60000
     });
   }
   if (normalizedProvider === "grok" || normalizedProvider === "xai") {

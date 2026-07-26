@@ -5,7 +5,7 @@ const solc = require("solc");
 const contractsDir = path.resolve(__dirname, "..", "contracts");
 const buildDir = path.resolve(__dirname, "..", "src", "contracts", "build");
 
-const CONTRACTS = ["TreasuryGuard.sol", "InvoiceVault.sol"];
+const CONTRACTS = ["TreasuryGuard.sol", "InvoiceVault.sol", "FinGuardEscrow.sol"];
 
 function compile() {
   const sources = {};

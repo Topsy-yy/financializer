@@ -13,6 +13,12 @@ const { runFollowUpWorkflow } = require("../services/followUpWorkflow");
 const { getCoreWalletIntegrationSummary } = require("../services/coreWalletClient");
 const { deployCChainContract } = require("../services/avalancheContractDeployer");
 const { appendDeploymentRecord, listDeploymentRecords } = require("../services/contractDeploymentHistory");
+const { appendLedgerEntry, listLedgerEntries, summarizeMonth: summarizeOnchainMonth } = require("../services/onchainLedger");
+const entitlements = require("../services/entitlements");
+const { computeCashflowForecast } = require("../services/cashflowForecast");
+const { buildReportModel } = require("../services/reportFormatter");
+const { renderReportPdf } = require("../services/pdfReport");
+const customRules = require("../services/customRules");
 const { listContractTemplates } = require("../services/contractTemplateRegistry");
 const { createNonce, verifySignature } = require("../services/walletAuth");
 const { verifyDeploymentTx } = require("../services/onchainVerifier");
@@ -37,6 +43,11 @@ function defaultProfile() {
     aiProvider: "openai",
     aiApiKey: "",
     aiAssistant: "controller-core",
+    plan: "free",
+    credits: null,
+    creditsPeriod: null,
+    customRules: [],
+    ruleExecutionHistory: [],
     googleSub: "",
     googleName: "",
     googleEmail: "",
@@ -339,6 +350,15 @@ function buildAnomalies(detections) {
     });
   });
 
+  // User-defined custom rule matches (evaluated per user, attached before buildContext).
+  (detections.customRuleMatches || []).forEach((m) => {
+    items.push({
+      type: m.type || "custom_rule",
+      severity: m.severity || "medium",
+      description: m.description
+    });
+  });
+
   return items;
 }
 
@@ -611,6 +631,7 @@ function buildContext({ month, monthlyData, analysis, report, followUp, reviewHi
   const customers = buildCustomerSummary(monthlyData);
   const revenue = buildRevenueSummary(monthlyData, period, reviewHistory);
   const health = buildHealthSummary({ cashflow, revenue, vendors, customers, anomalies });
+  const onchain = summarizeOnchainMonth(period);
 
   const actionItems = Array.isArray(followUp?.actions)
     ? followUp.actions.map((action) => ({
@@ -632,6 +653,7 @@ function buildContext({ month, monthlyData, analysis, report, followUp, reviewHi
     anomalies,
     vendors,
     customers,
+    onchain,
     actions: {
       actions: actionItems,
       skills: ["followup-orchestrator", "recommendation-engine"]
@@ -646,6 +668,7 @@ function buildContext({ month, monthlyData, analysis, report, followUp, reviewHi
       cashflow,
       risk: anomalies,
       revenue,
+      onchain,
       findings: anomalies.items,
       ai_summary: aiSummary,
       pending_actions: actionItems.length,
@@ -1362,6 +1385,27 @@ router.post("/monthly-review", async (req, res) => {
 
     const analysis = analyzeFinancialRisk(monthlyData);
 
+    // Evaluate user-defined financial rules and merge their findings into the
+    // analysis. buildAnomalies() then surfaces them alongside built-in findings —
+    // no detection logic is duplicated (duplicate_payment reuses the engine).
+    try {
+      const ruleEval = customRules.evaluateCustomRules(
+        req.userStore.profile.customRules,
+        monthlyData,
+        analysis,
+        { ownerKeywords: config.businessOwnerKeywords }
+      );
+      analysis.detections.customRuleMatches = ruleEval.findings;
+      if (ruleEval.executions.length) {
+        const hist = req.userStore.profile.ruleExecutionHistory || (req.userStore.profile.ruleExecutionHistory = []);
+        hist.push({ month: month || monthlyData.period || null, at: new Date().toISOString(), results: ruleEval.executions });
+        while (hist.length > 50) hist.shift();
+        persistProfile(req.userStore);
+      }
+    } catch (e) {
+      // Custom rules must never break the core review.
+    }
+
     const report = buildStructuredReport({
       businessName: businessName || req.userStore.profile.businessName,
       businessAddress: businessAddress || config.businessAddress,
@@ -1383,12 +1427,11 @@ router.post("/monthly-review", async (req, res) => {
     context.rawAnalysis = analysis;
     req.userStore.latestReviewContext = context;
 
-    // Bring-your-own-AI: a user-configured key/provider in Settings always
-    // wins. Otherwise fall back to the app's built-in default AI (NVIDIA),
-    // so analysis works out of the box without the user ever touching Settings.
-    const ownAiKey = req.userStore.profile.aiApiKey || "";
-    const resolvedAiKey = ownAiKey || config.nvidiaApiKey || "";
-    const resolvedAiProvider = ownAiKey ? req.userStore.profile.aiProvider : "nvidia";
+    // Plan-based AI routing + credit gating. The deterministic analysis above
+    // is always free; only this AI narration is metered. Routing precedence:
+    // own key -> Custom AI (unmetered); pro -> managed Mistral; free -> managed NVIDIA.
+    const profile = req.userStore.profile;
+    const routing = entitlements.resolveAiRouting(profile, config);
     const shouldUseAi = use_ai_analysis !== false;
     let aiAnalysis = {
       ok: false,
@@ -1397,14 +1440,28 @@ router.post("/monthly-review", async (req, res) => {
     };
 
     if (shouldUseAi) {
-      if (resolvedAiKey) {
-        // The deterministic skill engine above (riskEngine.js + buildContext)
-        // has already computed every number for this month. The AI only
-        // interprets and narrates it -- explaining, prioritizing, and giving
-        // it founder-friendly voice -- it never recomputes or overrides it.
+      if (!routing.apiKey) {
+        aiAnalysis = {
+          ok: false,
+          mode: "skills-fallback",
+          reason: routing.mode === "byok" ? "missing_ai_api_key" : "managed_key_unavailable"
+        };
+      } else if (routing.managed && !entitlements.canAfford(profile, "monthly-review")) {
+        const ent = entitlements.getEntitlement(profile);
+        aiAnalysis = {
+          ok: false,
+          mode: "skills-fallback",
+          reason: "insufficient_credits",
+          plan: ent.plan,
+          credits: ent.credits,
+          cost: entitlements.creditCost("monthly-review")
+        };
+      } else {
+        // The deterministic skill engine above has already computed every
+        // number for this month. The AI only interprets and narrates it.
         const aiResult = await generateAiInterpretation({
-          apiKey: resolvedAiKey,
-          provider: resolvedAiProvider,
+          apiKey: routing.apiKey,
+          provider: routing.provider,
           assistant: req.userStore.profile.aiAssistant,
           businessName: businessName || req.userStore.profile.businessName,
           period: context.period,
@@ -1420,14 +1477,20 @@ router.post("/monthly-review", async (req, res) => {
         });
 
         if (aiResult.ok) {
+          // Only charge credits once the managed AI call actually succeeded.
+          let charged = null;
+          if (routing.managed) {
+            charged = entitlements.charge(profile, "monthly-review");
+            persistProfile(req.userStore);
+          }
           req.userStore.latestReviewContext.aiInsights = aiResult.output;
-
           aiAnalysis = {
             ok: true,
             mode: "ai+skills",
             provider: aiResult.provider,
             model: aiResult.model,
-            insights: aiResult.output
+            insights: aiResult.output,
+            credits_remaining: charged ? charged.remaining : null
           };
         } else {
           aiAnalysis = {
@@ -1436,12 +1499,6 @@ router.post("/monthly-review", async (req, res) => {
             reason: aiResult.reason || "ai_request_failed"
           };
         }
-      } else {
-        aiAnalysis = {
-          ok: false,
-          mode: "skills-fallback",
-          reason: "missing_ai_api_key"
-        };
       }
     }
 
@@ -1610,6 +1667,56 @@ router.post("/executive-report", (req, res) => {
   });
 });
 
+// Branded, downloadable PDF of the executive report. Reuses the existing
+// report context (no re-generation of analysis). Entitlement-gated:
+// Free = blocked (upgrade); Pro = 20 credits (charged only on success); BYOK = free.
+router.post("/executive-report/pdf", async (req, res) => {
+  try {
+    const context = getContext(req);
+    if (!context) {
+      return res.status(400).json({ ok: false, error: "no_report", message: "Run a monthly review first." });
+    }
+
+    const profile = req.userStore.profile;
+    const ent = entitlements.getEntitlement(profile);
+
+    // Free plan cannot download (BYOK and Pro can).
+    if (!ent.byok && ent.plan === "free") {
+      return res.status(403).json({
+        ok: false,
+        error: "upgrade_required",
+        message: "PDF reports are available on the Professional or Custom AI plans."
+      });
+    }
+    // Pro must have enough credits (BYOK is unmetered).
+    if (!ent.byok && ent.plan === "pro" && !entitlements.canAfford(profile, "executive-report")) {
+      return res.status(402).json({
+        ok: false,
+        error: "insufficient_credits",
+        credits: ent.credits,
+        cost: entitlements.creditCost("executive-report")
+      });
+    }
+
+    // Reuse the already-computed context; only format + render here.
+    const model = buildReportModel(context, profile, { title: req.body && req.body.title });
+    const pdf = await renderReportPdf(model); // throws on failure -> caught below, never charged
+
+    // Charge only after a successful render, and only on the managed Pro plan.
+    if (!ent.byok && ent.plan === "pro") {
+      entitlements.charge(profile, "executive-report");
+      persistProfile(req.userStore);
+    }
+
+    const safeName = String(model.company || "report").replace(/[^a-z0-9]+/gi, "-").toLowerCase().slice(0, 40);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="finguard-${safeName}-${model.period || "report"}.pdf"`);
+    return res.send(pdf);
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: "pdf_generation_failed", message: error.message });
+  }
+});
+
 router.post("/chat", async (req, res) => {
   try {
     const { message, activeMonth, history, ai_provider, ai_assistant } = req.body || {};
@@ -1659,15 +1766,19 @@ router.post("/chat", async (req, res) => {
     }
 
     const resolvedAssistant = ai_assistant || req.userStore.profile.aiAssistant;
-    const ownAiKey = req.userStore.profile.aiApiKey || "";
-    const resolvedAiKey = ownAiKey || config.nvidiaApiKey || "";
-    const resolvedProvider = ownAiKey ? (ai_provider || req.userStore.profile.aiProvider) : "nvidia";
+    const chatProfile = req.userStore.profile;
+    const routing = entitlements.resolveAiRouting(chatProfile, config);
+    const resolvedProvider = routing.provider;
     let aiFailureReason = null;
 
-    if (resolvedAiKey) {
+    if (!routing.apiKey) {
+      aiFailureReason = routing.mode === "byok" ? "missing_ai_api_key" : "managed_key_unavailable";
+    } else if (routing.managed && !entitlements.canAfford(chatProfile, "chat")) {
+      aiFailureReason = "insufficient_credits";
+    } else {
       const aiChat = await generateAiChatResponse({
-        apiKey: resolvedAiKey,
-        provider: resolvedProvider,
+        apiKey: routing.apiKey,
+        provider: routing.provider,
         assistant: resolvedAssistant,
         month: targetMonth,
         context: chatContext,
@@ -1675,6 +1786,7 @@ router.post("/chat", async (req, res) => {
       });
 
       if (aiChat.ok && aiChat.text) {
+        if (routing.managed) { entitlements.charge(chatProfile, "chat"); persistProfile(req.userStore); }
         return res.json({
           ok: true,
           intent: "ai_generated",
@@ -1786,6 +1898,289 @@ router.get("/avalanche/contracts/deployments", (req, res) => {
 
 router.get("/avalanche/networks", (req, res) => {
   return res.json({ ok: true, items: Object.values(config.avalancheNetworks) });
+});
+
+// Record an on-chain money movement (deposit / withdraw / release / refund / claim)
+// so it can be included in the monthly financial analysis.
+router.post("/avalanche/onchain/record", async (req, res) => {
+  const body = req.body || {};
+  const txHash = String(body.txHash || body.tx_hash || "").trim();
+  if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) {
+    return res.status(400).json({ ok: false, error: "invalid_tx_hash" });
+  }
+
+  const chainId = Number(body.chainId || body.chain_id) || null;
+  let verified = false;
+  // Best-effort on-chain verification (never blocks recording if RPC is down).
+  try {
+    const verification = await verifyDeploymentTx({ chainId, txHash });
+    verified = Boolean(verification && verification.verified);
+  } catch (e) { /* keep verified=false */ }
+
+  const saved = appendLedgerEntry({
+    month: body.month || null,
+    kind: body.kind || "transfer",
+    contractName: body.contractName || body.contract_name,
+    contractAddress: body.contractAddress || body.contract_address,
+    txHash,
+    chainId,
+    from: body.from,
+    to: body.to,
+    wallet: body.wallet || body.walletAddress,
+    amount: body.amount != null ? body.amount : body.amount_avax,
+    verified
+  });
+
+  return res.json({ ok: true, entry: saved });
+});
+
+router.get("/avalanche/onchain/ledger", (req, res) => {
+  if (req.query.month) {
+    return res.json({ ok: true, summary: summarizeOnchainMonth(String(req.query.month)) });
+  }
+  const items = listLedgerEntries(Number(req.query.limit) || 100);
+  return res.json({ ok: true, items, count: items.length });
+});
+
+// Cash-flow forecast: deterministic 30/60/90-day projection (always free) plus
+// an optional AI advisory that costs credits on managed plans.
+router.post("/forecast", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const now = new Date();
+    const currentMonth = now.getUTCFullYear() + "-" + String(now.getUTCMonth() + 1).padStart(2, "0");
+    const targetMonth = body.month || (req.userStore.latestReviewContext && req.userStore.latestReviewContext.period) || currentMonth;
+
+    // Reuse the month already on the dashboard, else compute fresh.
+    const ctx = req.userStore.latestReviewContext;
+    let monthlyData, cashflow;
+    if (ctx && ctx.period === targetMonth && ctx.rawMonthlyData) {
+      monthlyData = ctx.rawMonthlyData;
+      cashflow = ctx.cashflow;
+    } else {
+      const uploaded = req.userStore.uploadedMonthlyData[targetMonth];
+      if (uploaded) monthlyData = uploaded;
+      else if (req.userStore.profile.zohoRefreshToken) monthlyData = await zohoBooksClient.fetchMonthlyDataFromZoho(req.userStore.profile, targetMonth);
+      else monthlyData = await fetchMonthlyData({ month: targetMonth });
+      const analysis = analyzeFinancialRisk(monthlyData);
+      cashflow = buildCashFlowSummary(analysis, monthlyData);
+    }
+
+    let startingCash = toNumber(monthlyData.statements?.balanceSheet?.cashAndEquivalents, 0);
+    if (!startingCash && cashflow.cash_runway_months && cashflow.monthly_burn) {
+      startingCash = toNumber(cashflow.cash_runway_months, 0) * toNumber(cashflow.monthly_burn, 0);
+    }
+
+    const forecast = computeCashflowForecast({
+      startingCash,
+      monthlyNet: toNumber(cashflow.net_cash_flow, 0),
+      monthlyBurn: toNumber(cashflow.monthly_burn, 0),
+      overdueReceivables: toNumber(cashflow.overdue_receivables, 0)
+    });
+
+    // AI advisory (metered on managed plans, unmetered for BYOK).
+    const profile = req.userStore.profile;
+    const routing = entitlements.resolveAiRouting(profile, config);
+    let ai = { ok: false, reason: "ai_not_requested" };
+    if (body.use_ai_analysis !== false) {
+      if (!routing.apiKey) {
+        ai = { ok: false, reason: routing.mode === "byok" ? "missing_ai_api_key" : "managed_key_unavailable" };
+      } else if (routing.managed && !entitlements.canAfford(profile, "forecast")) {
+        const ent = entitlements.getEntitlement(profile);
+        ai = { ok: false, reason: "insufficient_credits", plan: ent.plan, credits: ent.credits, cost: entitlements.creditCost("forecast") };
+      } else {
+        const msg = "You are advising an SME founder on this cash-flow forecast. In 3-4 short sentences give the outlook, then 2 concrete actions. Use ONLY these already-computed numbers (do not invent any): " + JSON.stringify(forecast);
+        const aiChat = await generateAiChatResponse({
+          apiKey: routing.apiKey,
+          provider: routing.provider,
+          assistant: profile.aiAssistant,
+          month: targetMonth,
+          context: ctx || { cashflow },
+          message: msg
+        });
+        if (aiChat.ok && aiChat.text) {
+          if (routing.managed) { entitlements.charge(profile, "forecast"); persistProfile(req.userStore); }
+          ai = { ok: true, text: aiChat.text, provider: aiChat.provider, model: aiChat.model, credits_remaining: entitlements.getEntitlement(profile).credits };
+        } else {
+          ai = { ok: false, reason: aiChat.reason || "ai_request_failed" };
+        }
+      }
+    }
+
+    return res.json({ ok: true, month: targetMonth, forecast, ai });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+// AI Action Plan: turn this month's findings into a concrete, ordered,
+// time-estimated task list. Gated AI action (metered on managed plans).
+router.post("/action-plan", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const now = new Date();
+    const currentMonth = now.getUTCFullYear() + "-" + String(now.getUTCMonth() + 1).padStart(2, "0");
+    const targetMonth = body.month || (req.userStore.latestReviewContext && req.userStore.latestReviewContext.period) || currentMonth;
+
+    let ctx = req.userStore.latestReviewContext;
+    if (!ctx || ctx.period !== targetMonth || !ctx.rawAnalysis) {
+      const uploaded = req.userStore.uploadedMonthlyData[targetMonth];
+      let monthlyData;
+      if (uploaded) monthlyData = uploaded;
+      else if (req.userStore.profile.zohoRefreshToken) monthlyData = await zohoBooksClient.fetchMonthlyDataFromZoho(req.userStore.profile, targetMonth);
+      else monthlyData = await fetchMonthlyData({ month: targetMonth });
+      const analysis = analyzeFinancialRisk(monthlyData);
+      ctx = buildContext({ month: targetMonth, monthlyData, analysis, report: {}, followUp: {}, reviewHistory: req.userStore.reviewHistory });
+    }
+
+    // Compact summary of what needs acting on this month.
+    const findings = {
+      health_score: ctx.health && ctx.health.overall_score,
+      cashflow: { runway_days: ctx.cashflow && ctx.cashflow.runway_days, net: ctx.cashflow && ctx.cashflow.net_cash_flow },
+      anomalies: (ctx.anomalies && ctx.anomalies.items || []).slice(0, 8),
+      vendors: ctx.vendors && ctx.vendors.top_vendor_share,
+      customers: ctx.customers && ctx.customers.top_customer_share,
+      existing_actions: (ctx.actions && ctx.actions.actions || []).slice(0, 8)
+    };
+
+    const profile = req.userStore.profile;
+    const routing = entitlements.resolveAiRouting(profile, config);
+    let ai = { ok: false, reason: "ai_not_requested" };
+
+    if (!routing.apiKey) {
+      ai = { ok: false, reason: routing.mode === "byok" ? "missing_ai_api_key" : "managed_key_unavailable" };
+    } else if (routing.managed && !entitlements.canAfford(profile, "action-plan")) {
+      const ent = entitlements.getEntitlement(profile);
+      ai = { ok: false, reason: "insufficient_credits", plan: ent.plan, credits: ent.credits, cost: entitlements.creditCost("action-plan") };
+    } else {
+      const msg = "You are an SME financial controller. Turn these findings into a concrete, prioritized action plan for this week. " +
+        "Give a numbered list; for each item state the specific action, who does it (founder or accountant), and an estimated time. " +
+        "End with a total estimated time. Use ONLY these already-computed findings (never invent numbers): " + JSON.stringify(findings);
+      const aiChat = await generateAiChatResponse({
+        apiKey: routing.apiKey,
+        provider: routing.provider,
+        assistant: profile.aiAssistant,
+        month: targetMonth,
+        context: ctx,
+        message: msg
+      });
+      if (aiChat.ok && aiChat.text) {
+        if (routing.managed) { entitlements.charge(profile, "action-plan"); persistProfile(req.userStore); }
+        ai = { ok: true, text: aiChat.text, provider: aiChat.provider, model: aiChat.model, credits_remaining: entitlements.getEntitlement(profile).credits };
+      } else {
+        ai = { ok: false, reason: aiChat.reason || "ai_request_failed" };
+      }
+    }
+
+    return res.json({ ok: true, month: targetMonth, ai });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+// ── Custom Financial Rules (Professional & Custom AI) ──────────
+function canManageRules(profile) {
+  const ent = entitlements.getEntitlement(profile);
+  return ent.byok || ent.plan === "pro";
+}
+
+router.get("/rules", (req, res) => {
+  const profile = req.userStore.profile;
+  const ent = entitlements.getEntitlement(profile);
+  return res.json({
+    ok: true,
+    rules: profile.customRules || [],
+    examples: customRules.EXAMPLE_RULES,
+    rule_types: customRules.RULE_TYPES,
+    actions: customRules.ACTIONS,
+    severities: customRules.SEVERITIES,
+    can_manage: ent.byok || ent.plan === "pro",
+    plan: ent.plan
+  });
+});
+
+router.post("/rules", (req, res) => {
+  const profile = req.userStore.profile;
+  if (!canManageRules(profile)) {
+    return res.status(403).json({ ok: false, error: "upgrade_required", message: "Custom financial rules are available on the Professional or Custom AI plans." });
+  }
+  const v = customRules.validateRule(req.body || {});
+  if (!v.ok) return res.status(400).json({ ok: false, error: "invalid_rule", message: v.error });
+  const rule = Object.assign(
+    { id: "rule-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), createdAt: new Date().toISOString() },
+    v.rule
+  );
+  profile.customRules = profile.customRules || [];
+  profile.customRules.push(rule);
+  persistProfile(req.userStore);
+  return res.json({ ok: true, rule });
+});
+
+router.put("/rules/:id", (req, res) => {
+  const profile = req.userStore.profile;
+  if (!canManageRules(profile)) return res.status(403).json({ ok: false, error: "upgrade_required" });
+  const list = profile.customRules || [];
+  const idx = list.findIndex((r) => r.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ ok: false, error: "not_found" });
+  const body = req.body || {};
+  // Lightweight enable/disable toggle, or a full edit.
+  if (Object.keys(body).length === 1 && typeof body.enabled === "boolean") {
+    list[idx].enabled = body.enabled;
+  } else {
+    const v = customRules.validateRule(body);
+    if (!v.ok) return res.status(400).json({ ok: false, error: "invalid_rule", message: v.error });
+    list[idx] = Object.assign({}, list[idx], v.rule);
+  }
+  persistProfile(req.userStore);
+  return res.json({ ok: true, rule: list[idx] });
+});
+
+router.delete("/rules/:id", (req, res) => {
+  const profile = req.userStore.profile;
+  if (!canManageRules(profile)) return res.status(403).json({ ok: false, error: "upgrade_required" });
+  const before = (profile.customRules || []).length;
+  profile.customRules = (profile.customRules || []).filter((r) => r.id !== req.params.id);
+  persistProfile(req.userStore);
+  return res.json({ ok: true, removed: before - profile.customRules.length });
+});
+
+// Preview a candidate rule against the current month's data before saving.
+router.post("/rules/preview", (req, res) => {
+  const profile = req.userStore.profile;
+  if (!canManageRules(profile)) return res.status(403).json({ ok: false, error: "upgrade_required" });
+  const candidate = (req.body && req.body.rule) || req.body || {};
+  const context = getContext(req);
+  const monthlyData = context && context.rawMonthlyData;
+  const analysis = context && context.rawAnalysis;
+  if (!monthlyData || !analysis) {
+    return res.json({ ok: true, preview: { matchCount: 0, samples: [], no_data: true } });
+  }
+  const result = customRules.previewRule(candidate, monthlyData, analysis, { ownerKeywords: config.businessOwnerKeywords });
+  if (!result.ok) return res.status(400).json({ ok: false, error: "invalid_rule", message: result.error });
+  return res.json({ ok: true, preview: { matchCount: result.matchCount, samples: result.samples } });
+});
+
+router.get("/rules/history", (req, res) => {
+  const hist = (req.userStore.profile.ruleExecutionHistory || []).slice(-20).reverse();
+  return res.json({ ok: true, history: hist });
+});
+
+// Current plan + AI credit balance for the signed-in user.
+router.get("/entitlement", (req, res) => {
+  const ent = entitlements.getEntitlement(req.userStore.profile);
+  persistProfile(req.userStore); // ensurePeriod() may have refilled this period
+  return res.json({ ok: true, entitlement: ent });
+});
+
+// TEST STUB: manually set the plan. In production this is driven by a payment
+// webhook (Paystack/Stripe), never a direct client call.
+router.post("/plan", (req, res) => {
+  const plan = String((req.body && req.body.plan) || "").toLowerCase();
+  if (!entitlements.setPlan(req.userStore.profile, plan)) {
+    return res.status(400).json({ ok: false, error: "invalid_plan" });
+  }
+  persistProfile(req.userStore);
+  return res.json({ ok: true, entitlement: entitlements.getEntitlement(req.userStore.profile) });
 });
 
 router.get("/wallet/nonce", (req, res) => {

@@ -22,6 +22,7 @@ function loadArtifact(fileName) {
 
 const treasuryGuard = loadArtifact("TreasuryGuard.json");
 const invoiceVault = loadArtifact("InvoiceVault.json");
+const finGuardEscrow = loadArtifact("FinGuardEscrow.json");
 
 const TEMPLATES = [
   {
@@ -47,6 +48,22 @@ const TEMPLATES = [
     abi: invoiceVault.abi,
     bytecode: invoiceVault.bytecode,
     constructorArgsSchema: []
+  },
+  {
+    id: "finguard-escrow-v1",
+    contractName: finGuardEscrow.contractName,
+    label: "Two-Party Escrow",
+    icon: "briefcase",
+    description:
+      "Holds funds between two organisations. The counterparty (payer) deposits; your organisation (payee) " +
+      "is paid when they release — or you can claim after a deadline if they stall. The payer can refund itself " +
+      "before the deadline. Every deposit, release and refund is recorded permanently on-chain.",
+    abi: finGuardEscrow.abi,
+    bytecode: finGuardEscrow.bytecode,
+    constructorArgsSchema: [
+      { name: "payer", type: "address", source: "counterparty", label: "Counterparty (payer) wallet" },
+      { name: "deadlineSeconds", type: "uint", source: "deadlineSeconds", default: 86400, label: "Deadline (seconds)" }
+    ]
   }
 ];
 

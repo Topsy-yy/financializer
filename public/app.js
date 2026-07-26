@@ -5,6 +5,7 @@
 
 /* ── 1. DOM References ───────────────────────────────────────── */
 var $pageContent    = document.getElementById('page-content');
+var $pageTabs       = document.getElementById('page-tabs');
 var $pageTitle      = document.getElementById('page-title');
 var $companyContext = document.getElementById('company-context');
 var $analysisMonth  = document.getElementById('analysis-month');
@@ -53,6 +54,7 @@ var appState = {
   aiAssistant: 'controller-core',
   chatHistory: [],
   currentPage: 'overview',
+  pageTab: {},
   isLoading: false
 };
 
@@ -169,13 +171,78 @@ var AI_FAILURE_MESSAGES = {
   unparseable_response: 'The AI returned a response we couldn’t parse. Showing rule-based analysis instead.',
   timeout: 'The AI request timed out. Showing rule-based analysis instead.',
   request_failed: 'Could not reach the AI provider. Showing rule-based analysis instead.',
-  ai_analysis_disabled: 'AI analysis is disabled on this server.'
+  ai_analysis_disabled: 'AI analysis is disabled on this server.',
+  insufficient_credits: 'You’ve used your AI credits for this month. Upgrade to Pro for more, or add your own API key in Settings. Your full analysis below is still free.',
+  managed_key_unavailable: 'The managed AI service isn’t configured on this server. Add your own API key in Settings to use AI narration.'
 };
 
 function notifyAiFailureIfAny(aiAnalysis) {
   if (!aiAnalysis || aiAnalysis.ok || aiAnalysis.reason === 'missing_ai_api_key' || aiAnalysis.reason === 'ai_not_requested') return;
   var message = AI_FAILURE_MESSAGES[aiAnalysis.reason] || ('AI analysis failed (' + aiAnalysis.reason + '). Showing rule-based analysis instead.');
-  showToast(message, 'warning');
+  showToast(message, aiAnalysis.reason === 'insufficient_credits' ? 'info' : 'warning');
+}
+
+/* ── Plan & AI credits (entitlements) ────────────────────────── */
+function renderCreditsChip() {
+  var chip = document.getElementById('credits-chip');
+  if (!chip) return;
+  var e = appState.entitlement;
+  if (!e) { chip.classList.add('hidden'); return; }
+  chip.classList.remove('hidden');
+  if (e.byok) {
+    chip.innerHTML = icon('bot') + ' Custom AI';
+    chip.title = 'Using your own API key — AI is unmetered.';
+  } else {
+    chip.innerHTML = icon('bot') + ' ' + escapeHtml(e.plan_label) + ' · ' + e.credits + ' credits';
+    chip.title = e.credits + ' of ' + e.allowance + ' AI credits left this month.';
+  }
+}
+
+function loadEntitlement() {
+  return fetch('/api/entitlement').then(function(r) { return r.json(); }).then(function(d) {
+    if (d && d.ok) { appState.entitlement = d.entitlement; renderCreditsChip(); }
+    return appState.entitlement;
+  }).catch(function() { return null; });
+}
+
+function setPlan(plan) {
+  return fetch('/api/plan', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ plan: plan })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d && d.ok) {
+      appState.entitlement = d.entitlement;
+      renderCreditsChip();
+      showToast('Plan set to ' + d.entitlement.plan_label, 'success');
+      if (appState.currentPage === 'settings' && routes.settings) routes.settings.render();
+    } else {
+      showToast('Could not change plan.', 'error');
+    }
+    return d;
+  }).catch(function() { showToast('Could not change plan.', 'error'); });
+}
+
+function renderPlanPanel() {
+  var el = document.getElementById('plan-panel-body');
+  if (!el) return;
+  var e = appState.entitlement;
+  if (!e) { el.innerHTML = '<p class="text-sm text-muted">Loading plan…</p>'; return; }
+
+  var h = '<div class="plan-current text-sm">Current plan: <strong class="text-brand-bright">' + escapeHtml(e.plan_label) + '</strong>' + (e.byok ? ' — using your own API key' : '') + '</div>';
+  if (e.byok) {
+    h += '<p class="text-sm text-muted" style="margin-top:0.5rem;">You’re on Custom AI: your own key is used and AI usage is <strong>not metered</strong>. Remove your key in the AI Assistant tab to fall back to a managed plan.</p>';
+  } else {
+    var pct = e.allowance ? Math.max(0, Math.min(100, Math.round((e.credits / e.allowance) * 100))) : 0;
+    h += '<div class="progress-bar" style="margin:0.6rem 0;"><div class="progress-fill" style="width:' + pct + '%"></div></div>';
+    h += '<div class="text-sm text-muted"><strong class="text-main">' + e.credits + '</strong> of ' + e.allowance + ' AI credits left this month.</div>';
+  }
+  h += '<div class="text-xs text-muted" style="margin-top:0.75rem;">Credit costs — AI chat: 2 · monthly review: 15 · executive report: 20 · forecast: 25. Your computed dashboard is always free.</div>';
+
+  h += '<div class="settings-card-head" style="margin-top:1.5rem;margin-bottom:0.6rem;"><h3>Change plan</h3><p>Payments aren’t wired up yet — use these to simulate upgrading while testing.</p></div>';
+  h += '<div style="display:flex;gap:0.5rem;flex-wrap:wrap;">';
+  h += '<button type="button" class="btn-secondary btn-small" onclick="setPlan(\'free\')">Starter (Free)</button>';
+  h += '<button type="button" class="btn-primary btn-small" onclick="setPlan(\'pro\')">Professional</button>';
+  h += '</div>';
+  el.innerHTML = h;
 }
 
 function showStatus(text) {
@@ -924,24 +991,75 @@ $btnDemo.addEventListener('click', function() {
   showToast('Demo Mode active — Zoho and wallet connected with sample data.', 'info');
 });
 
-/* ── 7. Router ───────────────────────────────────────────────── */
+/* ── 7. Router (Fundex-style 5-page structure) ───────────────────
+   The 12 original views are consolidated into 5 top-level pages.
+   Each tabbed page reuses the original render functions unchanged —
+   they still fill #page-content; the tab bar lives in #page-tabs. */
+var PAGE_TABS = {
+  'activity': [
+    { key: 'flagged', label: 'Flagged Items', render: renderRiskAnomalies },
+    { key: 'actions', label: 'Action Center',  render: renderActionCenter }
+  ],
+  'analytics': [
+    { key: 'health',   label: 'Financial Health', render: renderFinancialHealth },
+    { key: 'cashflow', label: 'Cash Flow',        render: renderCashFlow },
+    { key: 'forecast', label: 'Forecast',         render: renderForecast },
+    { key: 'revenue',  label: 'Revenue',          render: renderRevenueIntelligence },
+    { key: 'reports',  label: 'Executive Reports', render: renderExecutiveReports }
+  ],
+  'concentration': [
+    { key: 'vendors',   label: 'Vendors',   render: renderVendors },
+    { key: 'customers', label: 'Customers', render: renderCustomers }
+  ]
+};
+
+function renderDashboard() {
+  if ($pageTabs) $pageTabs.innerHTML = '';
+  renderOverview();
+}
+
+/* Untabbed page: clear the tab bar, then render */
+function renderSimplePage(fn) {
+  if ($pageTabs) $pageTabs.innerHTML = '';
+  fn();
+}
+
+function renderTabbedPage(page) {
+  var tabs = PAGE_TABS[page];
+  if (!tabs) { renderDashboard(); return; }
+  var active = appState.pageTab[page] || tabs[0].key;
+  if (!tabs.some(function(t) { return t.key === active; })) active = tabs[0].key;
+  appState.pageTab[page] = active;
+
+  var bar = '<div class="page-tabs-inner">';
+  tabs.forEach(function(t) {
+    bar += '<button type="button" class="page-tab' + (t.key === active ? ' active' : '') +
+      '" onclick="switchTab(\'' + page + '\',\'' + t.key + '\')">' + escapeHtml(t.label) + '</button>';
+  });
+  bar += '</div>';
+  if ($pageTabs) $pageTabs.innerHTML = bar;
+
+  var activeTab = tabs.filter(function(t) { return t.key === active; })[0] || tabs[0];
+  activeTab.render();
+}
+
+function switchTab(page, tab) {
+  appState.pageTab[page] = tab;
+  renderTabbedPage(page);
+}
+
 var routes = {
-  'overview':         { title: 'Controller Overview',   render: renderOverview },
-  'financial-health': { title: 'Financial Health',      render: renderFinancialHealth },
-  'cashflow':         { title: 'Cash Flow',             render: renderCashFlow },
-  'revenue':          { title: 'Revenue Intelligence',  render: renderRevenueIntelligence },
-  'risk':             { title: 'Risk & Anomalies',      render: renderRiskAnomalies },
-  'vendors':          { title: 'Vendors',               render: renderVendors },
-  'customers':        { title: 'Customers',             render: renderCustomers },
-  'actions':          { title: 'Action Center',         render: renderActionCenter },
-  'reports':          { title: 'Executive Reports',     render: renderExecutiveReports },
-  'contracts':        { title: 'Contracts',             render: renderContracts },
-  'ai-controller':    { title: 'FinGuard AI',         render: renderAIController },
-  'settings':         { title: 'Settings',              render: renderSettings }
+  'overview':      { title: 'Dashboard',          render: renderDashboard },
+  'activity':      { title: 'Activity & Actions', render: function() { renderTabbedPage('activity'); } },
+  'analytics':     { title: 'Analytics',          render: function() { renderTabbedPage('analytics'); } },
+  'concentration': { title: 'Concentration Risk', render: function() { renderTabbedPage('concentration'); } },
+  'contracts':     { title: 'Contracts',          render: function() { renderSimplePage(renderContracts); } },
+  'settings':      { title: 'Settings',           render: function() { renderSimplePage(renderSettings); } }
 };
 
 function navigate(page) {
   if (!routes[page]) page = 'overview';
+  stopStatusPolling();
   appState.currentPage = page;
 
   /* Update nav active class */
@@ -987,11 +1105,87 @@ async function fetchPageData(endpoint) {
   }
 }
 
+var ANALYSIS_STEPS = [
+  'Fetching your financial data',
+  'Detecting anomalies & fraud signals',
+  'Analyzing cash flow & runway',
+  'Reviewing vendor & customer concentration',
+  'Scoring financial health',
+  'Writing the AI narrative'
+];
+
+function startAnalysisProgress(month) {
+  var steps = ANALYSIS_STEPS.map(function(s, i) {
+    return '<li class="ap-step" data-i="' + i + '"><span class="ap-mark"></span>' + escapeHtml(s) + '</li>';
+  }).join('');
+  var showNotifBtn = window.Notification && Notification.permission === 'default';
+  var notifBtn = showNotifBtn
+    ? '<button type="button" class="btn-secondary btn-small" id="ap-enable-notif" style="margin-top:0.85rem;">' + icon('bot') + ' Notify me when it’s done</button>'
+    : '';
+  $pageContent.innerHTML =
+    '<div class="analysis-progress glass-card">' +
+      '<div class="ap-head"><span class="ap-spinner"></span><div>' +
+        '<div class="ap-title">Running your monthly review…</div>' +
+        '<div class="ap-sub">Analyzing ' + escapeHtml(getMonthLabel(month)) + ' — this can take up to a minute on the free AI tier.</div>' +
+      '</div></div>' +
+      '<ul class="ap-steps">' + steps + '</ul>' +
+      '<div class="ap-note">' + icon('check-circle') + ' You can switch to other tabs while this runs — we’ll notify you when the analysis is ready.</div>' +
+      notifBtn +
+    '</div>';
+
+  var enable = document.getElementById('ap-enable-notif');
+  if (enable) {
+    enable.addEventListener('click', function() {
+      if (!window.Notification) return;
+      Notification.requestPermission().then(function(p) {
+        if (p === 'granted') { enable.textContent = 'Notifications on'; enable.disabled = true; }
+        else { enable.textContent = 'Notifications blocked'; enable.disabled = true; }
+      });
+    });
+  }
+
+  var mark = function(idx) {
+    document.querySelectorAll('.ap-step').forEach(function(li) {
+      var n = Number(li.getAttribute('data-i'));
+      li.classList.toggle('done', n < idx);
+      li.classList.toggle('active', n === idx);
+    });
+  };
+  var i = 0;
+  mark(0);
+  appState.analysisTimer = setInterval(function() {
+    i = Math.min(i + 1, ANALYSIS_STEPS.length - 1);
+    mark(i);
+  }, 4500);
+}
+
+function stopAnalysisProgress() {
+  if (appState.analysisTimer) { clearInterval(appState.analysisTimer); appState.analysisTimer = null; }
+}
+
+function notifyAnalysisReady(month, ok) {
+  if (window.Notification && Notification.permission === 'granted') {
+    try {
+      new Notification(ok ? 'FinGuard analysis ready' : 'FinGuard analysis failed', {
+        body: ok
+          ? 'Your review for ' + getMonthLabel(month) + ' is ready to view.'
+          : 'Could not complete the review for ' + getMonthLabel(month) + '.',
+        tag: 'finguard-analysis'
+      });
+    } catch (e) {}
+  }
+}
+
 async function runMonthlyReview(month) {
   appState.activeMonth = month;
   $analysisMonth.innerHTML = icon('clock') + ' Analyzing ' + escapeHtml(getMonthLabel(month)) + '…';
   showStatus('Running monthly review…');
   appState.isLoading = true;
+
+  /* Ask for notification permission within this click gesture so we can alert when done. */
+  if (window.Notification && Notification.permission === 'default') {
+    try { Notification.requestPermission(); } catch (e) {}
+  }
 
   /* Update month picker active state */
   var btns = document.querySelectorAll('.month-btn');
@@ -1003,6 +1197,9 @@ async function runMonthlyReview(month) {
     }
   });
 
+  startAnalysisProgress(month);
+
+  var ok = false;
   try {
     var res = await fetch('/api/monthly-review', {
       method: 'POST',
@@ -1013,6 +1210,7 @@ async function runMonthlyReview(month) {
 
     if (data.ok) {
       appState.cachedData = data;
+      ok = true;
       $analysisMonth.innerHTML = icon('calendar') + ' ' + escapeHtml(getMonthLabel(month));
       showToast('Analysis complete for ' + getMonthLabel(month), 'success');
       notifyAiFailureIfAny(data.aiAnalysis);
@@ -1025,6 +1223,10 @@ async function runMonthlyReview(month) {
     $analysisMonth.innerHTML = icon('x-circle') + ' Error';
   }
 
+  stopAnalysisProgress();
+  notifyAnalysisReady(month, ok);
+  loadEntitlement(); /* credits may have been consumed */
+
   appState.isLoading = false;
   showStatus('');
 
@@ -1036,7 +1238,60 @@ async function runMonthlyReview(month) {
 
 /* ── 9. Page Renderers ───────────────────────────────────────── */
 
-/* ── Overview ────────────────────────────────────────────────── */
+/* ── Fundex-style dashboard building blocks ──────────────────── */
+function fundexStat(iconName, label, value, opts) {
+  opts = opts || {};
+  var delta = '';
+  if (opts.deltaText) {
+    var dir = opts.deltaDir === 'down' ? 'down' : (opts.deltaDir === 'up' ? 'up' : 'flat');
+    var arrow = dir === 'down' ? '▼ ' : (dir === 'up' ? '▲ ' : '');
+    delta = '<span class="stat-delta ' + dir + '">' + arrow + escapeHtml(opts.deltaText) + '</span>';
+  }
+  var sub = opts.sub ? '<span class="stat-since">' + escapeHtml(opts.sub) + '</span>' : '';
+  return '<div class="stat-card">' +
+    '<div class="stat-card-top"><span class="stat-icon">' + icon(iconName) + '</span>' +
+    '<span class="stat-label">' + escapeHtml(label) + '</span></div>' +
+    '<div class="stat-value ' + (opts.valueClass || '') + '">' + value + '</div>' +
+    '<div class="stat-foot">' + delta + sub + '</div>' +
+  '</div>';
+}
+
+function fundexBarChart(bars) {
+  var max = 1;
+  bars.forEach(function(b) { max = Math.max(max, Math.abs(b.value)); });
+  var cols = bars.map(function(b) {
+    var h = Math.max(4, Math.round(Math.abs(b.value) / max * 100));
+    return '<div class="barchart-col">' +
+      '<div class="barchart-val">' + escapeHtml(b.display) + '</div>' +
+      '<div class="barchart-track"><div class="barchart-bar" style="height:' + h + '%;background:' + b.color + '"></div></div>' +
+      '<div class="barchart-label">' + escapeHtml(b.label) + '</div>' +
+    '</div>';
+  }).join('');
+  return '<div class="barchart">' + cols + '</div>';
+}
+
+function fundexDonut(segments) {
+  var total = 0;
+  segments.forEach(function(s) { total += (s.pct || 0); });
+  if (total <= 0) return '';
+  var acc = 0;
+  var stops = [];
+  segments.forEach(function(s) {
+    var start = acc / total * 100;
+    acc += (s.pct || 0);
+    var end = acc / total * 100;
+    stops.push(s.color + ' ' + start + '% ' + end + '%');
+  });
+  var legend = segments.map(function(s) {
+    return '<div class="donut-legend-item"><span class="dot" style="background:' + s.color + '"></span>' +
+      '<span class="text-sm">' + escapeHtml(s.label) + '</span>' +
+      '<span class="text-sm text-muted" style="margin-left:auto">' + formatPercent(s.pct) + '</span></div>';
+  }).join('');
+  return '<div class="donut-wrap"><div class="donut" style="background:conic-gradient(' + stops.join(',') + ')"><div class="donut-hole"></div></div>' +
+    '<div class="donut-legend">' + legend + '</div></div>';
+}
+
+/* ── Overview (Dashboard) ────────────────────────────────────── */
 function renderOverview() {
   var months = generateRecentMonths(12);
   var monthGrid = '<div class="glass-card section-gap"><div class="card-title">Select Analysis Month</div><div class="month-picker-grid">';
@@ -1076,19 +1331,7 @@ function renderOverview() {
 
   var criticalFindings = (risk.findings || risk.items || review.findings || []).slice(0, 6);
 
-  var html = monthGrid;
-
-  /* KPI Row */
-  html += '<div class="kpi-row">';
-  html += '<div class="kpi-card"><div class="kpi-label">Health Score</div><div class="kpi-value ' + (!hasHealthScore ? 'text-muted' : healthScore >= 70 ? 'text-emerald' : healthScore >= 40 ? 'text-amber' : 'text-red') + '">' + healthScore + '<span class="text-muted text-sm">/100</span></div></div>';
-  html += '<div class="kpi-card"><div class="kpi-label">Current Risk Level</div><div class="kpi-value ' + (String(riskLevel).toLowerCase() === 'high' ? 'text-red' : String(riskLevel).toLowerCase() === 'medium' ? 'text-amber' : 'text-emerald') + '">' + escapeHtml(String(riskLevel)) + '</div></div>';
-  html += '<div class="kpi-card"><div class="kpi-label">Cash Runway</div><div class="kpi-value">' + cashRunway + ' <span class="text-muted text-sm">days</span></div></div>';
-  html += '<div class="kpi-card"><div class="kpi-label">Revenue Trend</div><div class="kpi-value">' + revTrend + '</div></div>';
-  html += '<div class="kpi-card"><div class="kpi-label">Critical Findings</div><div class="kpi-value ' + (riskCount > 3 ? 'text-red' : 'text-amber') + '">' + riskCount + '</div></div>';
-  html += '<div class="kpi-card"><div class="kpi-label">Pending Actions</div><div class="kpi-value ' + (pendingActions > 0 ? 'text-amber' : 'text-emerald') + '">' + pendingActions + '</div></div>';
-  html += '</div>';
-
-  /* Critical Findings + AI Summary */
+  /* AI summary body (shown in the right rail) */
   var aiAnalysis = d.aiAnalysis || {};
   var aiSummaryBody;
   if (aiAnalysis.ok && aiAnalysis.insights) {
@@ -1113,45 +1356,104 @@ function renderOverview() {
     aiSummaryBody = '<p class="text-sm" style="line-height:1.7;white-space:pre-wrap;">' + escapeHtml(typeof ai === 'string' ? ai : JSON.stringify(ai, null, 2)) + '</p>';
   }
 
-  html += '<div class="grid-2col">';
-  html += '<div class="glass-card"><div class="card-title">Critical Findings</div>' + renderFindingsList(criticalFindings) + '</div>';
-  html += '<div class="glass-card glow-border"><div class="card-title">' + icon('bot') + ' FinGuard AI Summary</div>' + aiSummaryBody + '</div>';
+  var monthLabel = getMonthLabel(appState.activeMonth || '');
+  var html = monthGrid;
+
+  /* ── Stat cards row (Fundex style: icon + value + delta) ── */
+  var ncf = cashflow.net_cash_flow;
+  var gr = revenue.growth_rate;
+  html += '<div class="stat-row">';
+  html += fundexStat('shield', 'Financial Health',
+    (hasHealthScore ? healthScore : '—') + '<span class="stat-unit">/100</span>',
+    { valueClass: !hasHealthScore ? 'text-muted' : healthScore >= 70 ? 'text-emerald' : healthScore >= 40 ? 'text-amber' : 'text-red',
+      sub: hasHealthScore ? (healthScore >= 70 ? 'Strong position' : healthScore >= 40 ? 'Needs attention' : 'At risk') : 'No score yet' });
+  html += fundexStat('wallet', 'Cash Runway',
+    cashRunway + '<span class="stat-unit"> days</span>',
+    { sub: 'At current burn rate' });
+  html += fundexStat('trending-up', 'Net Cash Flow',
+    formatCurrency(ncf || 0),
+    { valueClass: ncf > 0 ? 'text-emerald' : ncf < 0 ? 'text-red' : '',
+      deltaText: ncf != null ? (ncf >= 0 ? 'Positive' : 'Negative') : '',
+      deltaDir: ncf >= 0 ? 'up' : 'down',
+      sub: monthLabel });
+  html += fundexStat('bar-chart', 'Revenue Trend',
+    revTrend,
+    { deltaText: gr != null ? formatPercent(gr) : '',
+      deltaDir: (gr != null && gr < 0) ? 'down' : 'up',
+      sub: 'vs prior period' });
   html += '</div>';
 
-  /* Cash Flow Forecast */
-  if (cashflow.net_cash_flow != null || cashflow.monthly_burn != null) {
-    html += '<div class="glass-card section-gap">';
-    html += '<div class="card-title">Cash Flow Snapshot</div>';
-    html += '<div class="kpi-row">';
-    html += '<div class="kpi-card"><div class="kpi-label">Net Cash Flow</div><div class="kpi-value">' + formatCurrency(cashflow.net_cash_flow || 0) + '</div></div>';
-    html += '<div class="kpi-card"><div class="kpi-label">Monthly Burn</div><div class="kpi-value">' + formatCurrency(cashflow.monthly_burn || cashflow.burn_rate || 0) + '</div></div>';
-    html += '<div class="kpi-card"><div class="kpi-label">Liquidity Ratio</div><div class="kpi-value">' + (cashflow.liquidity_ratio || '—') + '</div></div>';
-    html += '<div class="kpi-card"><div class="kpi-label">Receivables</div><div class="kpi-value">' + formatCurrency(cashflow.total_receivables || 0) + '</div></div>';
-    html += '</div></div>';
+  /* ── Main grid: left (chart + findings), right rail (hero + donut + AI) ── */
+  html += '<div class="dash-grid">';
+
+  /* LEFT column */
+  html += '<div class="dash-main">';
+
+  /* Cash Flow chart */
+  if (cashflow.net_cash_flow != null || cashflow.monthly_burn != null || cashflow.total_receivables != null) {
+    var bars = [
+      { label: 'Receivables', value: cashflow.total_receivables || 0, display: formatCurrency(cashflow.total_receivables || 0), color: '#22c55e' },
+      { label: 'Monthly Burn', value: cashflow.monthly_burn || cashflow.burn_rate || 0, display: formatCurrency(cashflow.monthly_burn || cashflow.burn_rate || 0), color: '#ef4444' },
+      { label: 'Net Flow', value: cashflow.net_cash_flow || 0, display: formatCurrency(cashflow.net_cash_flow || 0), color: '#8b5cf6' }
+    ];
+    html += '<div class="glass-card section-gap chart-card">' +
+      '<div class="chart-head"><div><div class="chart-title">Cash Flow</div>' +
+      '<div class="chart-sub">Inflow vs outflow</div></div>' +
+      '<span class="chart-period">' + escapeHtml(monthLabel || 'This month') + '</span></div>' +
+      fundexBarChart(bars) + '</div>';
   }
 
-  /* Fraud Watch + Expenses */
-  var hasFraud = Array.isArray(fraud) && fraud.length > 0;
-  var hasExpenses = Array.isArray(expenses) && expenses.length > 0;
-  if (hasFraud || hasExpenses) {
-    html += '<div class="grid-2col">';
-    if (hasFraud) {
-      html += '<div class="glass-card"><div class="card-title">' + icon('search') + ' Fraud Watch</div>' + renderFindingsList(fraud) + '</div>';
-    }
-    if (hasExpenses) {
-      html += '<div class="glass-card"><div class="card-title">' + icon('pie-chart') + ' Expense Breakdown</div>';
-      expenses.forEach(function(exp) {
-        var label = exp.category || exp.name || 'Unknown';
-        var pct = exp.percentage || exp.pct || 0;
-        html += '<div class="concentration-bar">' +
-          '<div class="concentration-bar-label"><span>' + escapeHtml(label) + '</span><span>' + formatPercent(pct) + '</span></div>' +
-          '<div class="concentration-bar-track"><div class="concentration-bar-fill" style="width:' + Math.min(pct, 100) + '%"></div></div>' +
-        '</div>';
-      });
-      html += '</div>';
-    }
-    html += '</div>';
+  /* Recent Findings table (Fundex "Recent Transactions" style) */
+  html += '<div class="glass-card chart-card"><div class="card-head"><div class="chart-title">Recent Findings</div>' +
+    '<button type="button" class="see-all" onclick="navigate(\'activity\')">See all</button></div>';
+  if (criticalFindings.length) {
+    html += '<table class="data-table"><thead><tr><th>Finding</th><th>Category</th><th>Severity</th></tr></thead><tbody>';
+    criticalFindings.forEach(function(f) {
+      var sev = String(f.severity || f.level || 'info').toLowerCase();
+      var text = f.message || f.title || f.description || f.text || 'Finding';
+      var cat = f.category || f.type || f.skill || '—';
+      var badgeClass = (sev === 'critical' || sev === 'high') ? 'badge-high' : sev === 'medium' ? 'badge-medium' : sev === 'low' ? 'badge-low' : 'badge-info';
+      var sevColor = (sev === 'critical' || sev === 'high') ? '#ef4444' : sev === 'medium' ? '#f59e0b' : sev === 'low' ? '#22c55e' : '#8b5cf6';
+      html += '<tr><td><div class="tx-cell"><span class="tx-icon" style="color:' + sevColor + ';background:' + sevColor + '22">' + icon('alert-triangle') + '</span>' + escapeHtml(text) + '</div></td>' +
+        '<td class="text-muted">' + escapeHtml(String(cat)) + '</td>' +
+        '<td><span class="' + badgeClass + '">' + escapeHtml(sev) + '</span></td></tr>';
+    });
+    html += '</tbody></table>';
+  } else {
+    html += renderEmptyState('check-circle', 'No findings', 'Your books look clean for this period.');
   }
+  html += '</div>';
+
+  html += '</div>'; /* /dash-main */
+
+  /* RIGHT rail */
+  html += '<div class="dash-rail">';
+
+  /* Violet hero card (Fundex balance card) */
+  var heroVal = ncf != null ? formatCurrency(ncf) : (hasHealthScore ? healthScore + ' / 100' : '—');
+  html += '<div class="balance-card">' +
+    '<div class="balance-card-label">Net cash position · ' + escapeHtml(monthLabel) + '</div>' +
+    '<div class="balance-card-value">' + heroVal + '</div>' +
+    '<div class="balance-card-actions">' +
+    '<button type="button" class="balance-btn" onclick="navigate(\'analytics\')">' + icon('bar-chart') + ' Analytics</button>' +
+    '<button type="button" class="balance-btn" onclick="navigate(\'activity\')">' + icon('clipboard') + ' Actions</button>' +
+    '</div></div>';
+
+  /* Expense breakdown donut */
+  var hasExpenses = Array.isArray(expenses) && expenses.length > 0;
+  if (hasExpenses) {
+    var palette = ['#8b5cf6', '#22c55e', '#f59e0b', '#ef4444', '#38bdf8', '#a78bfa'];
+    var segs = expenses.slice(0, 6).map(function(e, i) {
+      return { label: e.category || e.name || 'Other', pct: e.percentage || e.pct || 0, color: palette[i % palette.length] };
+    });
+    html += '<div class="glass-card"><div class="card-title">Expense Breakdown</div>' + fundexDonut(segs) + '</div>';
+  }
+
+  /* AI summary */
+  html += '<div class="glass-card"><div class="card-title">' + icon('bot') + ' FinGuard AI Summary</div>' + aiSummaryBody + '</div>';
+
+  html += '</div>'; /* /dash-rail */
+  html += '</div>'; /* /dash-grid */
 
   $pageContent.innerHTML = html;
 }
@@ -1276,6 +1578,77 @@ function renderCashFlow() {
     html += renderAiInsightsCard(data.ai_insights);
 
     $pageContent.innerHTML = html;
+  });
+}
+
+/* ── Cash-flow Forecast (premium: deterministic projection + gated AI advice) ── */
+function renderForecast() {
+  $pageContent.innerHTML = renderLoadingShimmer(3);
+  fetch('/api/forecast', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ month: appState.activeMonth || null })
+  }).then(function(r) { return r.json(); }).then(function(data) {
+    if (!data || !data.ok) {
+      $pageContent.innerHTML = renderEmptyState('trending-up', 'Forecast unavailable', 'Run a monthly review first, then open Forecast.');
+      return;
+    }
+    var f = data.forecast;
+    var fmt = function(n) { return formatCurrency(n); };
+    var statusClass = f.status === 'surplus' ? 'text-emerald' : f.status === 'critical' ? 'text-red' : 'text-amber';
+    var statusLabel = f.status === 'surplus' ? 'Cash-positive' : f.status === 'critical' ? 'Cash-critical' : 'Burning cash';
+    var daysLabel = f.days_to_zero != null ? (f.days_to_zero + ' days') : (f.monthly_net >= 0 ? 'No depletion' : '—');
+
+    var html = '<div class="stat-row">';
+    html += fundexStat('wallet', 'Cash on hand', fmt(f.starting_cash), { sub: 'Starting balance' });
+    html += fundexStat('trending-up', 'Monthly net', fmt(f.monthly_net), { valueClass: f.monthly_net >= 0 ? 'text-emerald' : 'text-red', sub: f.monthly_net >= 0 ? 'Surplus' : 'Burn rate' });
+    html += fundexStat('clock', 'Runs out in', daysLabel, { valueClass: statusClass, sub: statusLabel });
+    html += fundexStat('bar-chart', 'In 90 days', fmt(f.horizons[2].projected_balance), { valueClass: f.horizons[2].projected_balance >= 0 ? 'text-emerald' : 'text-red', sub: 'Projected balance' });
+    html += '</div>';
+
+    html += '<div class="dash-grid"><div class="dash-main">';
+
+    var bars = f.series.map(function(s) {
+      return { label: s.label, value: s.balance, display: fmt(s.balance), color: s.balance >= 0 ? '#22c55e' : '#ef4444' };
+    });
+    html += '<div class="glass-card chart-card"><div class="chart-head"><div><div class="chart-title">Projected cash balance</div>' +
+      '<div class="chart-sub">At current run-rate · next 90 days</div></div>' +
+      '<span class="chart-period">' + escapeHtml(getMonthLabel(data.month || '')) + '</span></div>' + fundexBarChart(bars) + '</div>';
+
+    html += '<div class="glass-card chart-card"><div class="card-head"><div class="chart-title">Projection detail</div></div>' +
+      '<table class="data-table"><thead><tr><th>Horizon</th><th>Projected balance</th></tr></thead><tbody>';
+    f.horizons.forEach(function(h) {
+      html += '<tr><td>' + h.days + ' days</td><td class="' + (h.projected_balance >= 0 ? 'text-emerald' : 'text-red') + '">' + fmt(h.projected_balance) + '</td></tr>';
+    });
+    if (f.optimistic_30d_balance != null) {
+      html += '<tr><td class="text-muted">+30d if receivables collected (' + fmt(f.overdue_receivables) + ')</td><td class="text-emerald">' + fmt(f.optimistic_30d_balance) + '</td></tr>';
+    }
+    html += '</tbody></table></div>';
+    html += '</div>'; /* /dash-main */
+
+    html += '<div class="dash-rail">';
+    html += '<div class="glass-card"><div class="card-title">' + icon('bot') + ' AI Forecast Advisor</div>';
+    var ai = data.ai || {};
+    if (ai.ok && ai.text) {
+      html += '<p class="text-sm" style="line-height:1.7;white-space:pre-wrap;">' + escapeHtml(ai.text) + '</p>';
+    } else if (ai.reason === 'insufficient_credits') {
+      html += '<p class="text-sm text-muted">You’re out of AI credits this month. The forecast numbers are free — upgrade to Pro or add your own API key for the AI outlook.</p>' +
+        '<button type="button" class="btn-primary btn-small" style="margin-top:0.6rem;" onclick="navigate(\'settings\')">Upgrade / add key</button>';
+    } else if (ai.reason === 'missing_ai_api_key' || ai.reason === 'managed_key_unavailable') {
+      html += '<p class="text-sm text-muted">Add an AI provider in Settings for an AI-written forecast outlook.</p>' +
+        '<button type="button" class="btn-secondary btn-small" style="margin-top:0.6rem;" onclick="navigate(\'settings\')">' + icon('settings') + ' AI settings</button>';
+    } else {
+      html += '<p class="text-sm text-muted">' + escapeHtml(AI_FAILURE_MESSAGES[ai.reason] || 'AI advisory unavailable — the forecast numbers above are still valid.') + '</p>';
+    }
+    html += '</div>';
+    html += '<div class="glass-card"><div class="card-title">How this is computed</div>' +
+      '<p class="text-sm text-muted">Projects your current cash forward at this month’s net cash-flow run-rate. Numbers come from the <span class="mono">cashflow-forecaster</span> skill — the AI only explains them, never invents them.</p></div>';
+    html += '</div></div>'; /* /dash-rail /dash-grid */
+
+    $pageContent.innerHTML = html;
+    loadEntitlement(); /* AI advisory may have spent credits */
+  }).catch(function() {
+    $pageContent.innerHTML = renderEmptyState('x-circle', 'Forecast failed', 'Could not compute the forecast. Try again.');
   });
 }
 
@@ -1514,21 +1887,26 @@ function renderActionCenter() {
 
     var html = '';
 
-    /* Export buttons */
-    html += '<div style="display:flex;gap:0.75rem;margin-bottom:1.25rem;">';
+    /* Action bar */
+    html += '<div style="display:flex;gap:0.75rem;margin-bottom:1.25rem;flex-wrap:wrap;">';
+    html += '<button class="btn-primary btn-small" onclick="generateActionPlan()">' + icon('bot') + ' Generate AI Action Plan</button>';
     html += '<button class="btn-small" onclick="exportActions(\'csv\')">' + icon('download') + ' Export CSV</button>';
     html += '<button class="btn-small" onclick="exportActions(\'json\')">' + icon('download') + ' Export JSON</button>';
     html += '</div>';
 
-    /* Actions table */
+    /* AI action plan renders here */
+    html += '<div id="action-plan-result" class="section-gap"></div>';
+
+    /* Actions table (with client-side done toggle) */
     if (actions.length > 0) {
       html += '<div class="glass-card">';
-      html += '<table class="data-table"><thead><tr><th>Priority</th><th>Task</th><th>Owner</th><th>Due</th><th>Status</th></tr></thead><tbody>';
+      html += '<table class="data-table"><thead><tr><th></th><th>Priority</th><th>Task</th><th>Owner</th><th>Due</th><th>Status</th></tr></thead><tbody>';
       actions.forEach(function(action) {
         var priority = action.priority || 'medium';
         html += '<tr>';
+        html += '<td><input type="checkbox" onchange="toggleTaskDone(this)" aria-label="Mark done" /></td>';
         html += '<td><span class="' + severityClass(priority) + '">' + escapeHtml(priority) + '</span></td>';
-        html += '<td>' + escapeHtml(action.task || action.description || action.title || '—') + '</td>';
+        html += '<td><span class="task-text">' + escapeHtml(action.task || action.description || action.title || '—') + '</span></td>';
         html += '<td><span class="action-owner">' + escapeHtml(action.owner || action.assigned_to || '—') + '</span></td>';
         html += '<td class="text-muted text-sm">' + escapeHtml(action.due || action.due_date || '—') + '</td>';
         html += '<td>' + escapeHtml(action.status || 'Pending') + '</td>';
@@ -1543,6 +1921,39 @@ function renderActionCenter() {
 
     $pageContent.innerHTML = html;
   });
+}
+
+/* AI Action Plan (gated premium action) */
+function generateActionPlan() {
+  var out = document.getElementById('action-plan-result');
+  if (out) out.innerHTML = '<div class="glass-card"><div class="card-title">' + icon('bot') + ' AI Action Plan</div>' + renderLoadingShimmer(2) + '</div>';
+  fetch('/api/action-plan', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ month: appState.activeMonth || null })
+  }).then(function(r) { return r.json(); }).then(function(data) {
+    if (!out) return;
+    var ai = (data && data.ai) || {};
+    var body;
+    if (ai.ok && ai.text) {
+      body = '<p class="text-sm" style="line-height:1.7;white-space:pre-wrap;">' + escapeHtml(ai.text) + '</p>';
+    } else if (ai.reason === 'insufficient_credits') {
+      body = '<p class="text-sm text-muted">You’re out of AI credits this month. Upgrade to Pro or add your own API key to generate action plans.</p>' +
+        '<button type="button" class="btn-primary btn-small" style="margin-top:0.6rem;" onclick="navigate(\'settings\')">Upgrade / add key</button>';
+    } else if (ai.reason === 'missing_ai_api_key' || ai.reason === 'managed_key_unavailable') {
+      body = '<p class="text-sm text-muted">Add an AI provider in Settings to generate an action plan.</p>' +
+        '<button type="button" class="btn-secondary btn-small" style="margin-top:0.6rem;" onclick="navigate(\'settings\')">' + icon('settings') + ' AI settings</button>';
+    } else {
+      body = '<p class="text-sm text-muted">' + escapeHtml(AI_FAILURE_MESSAGES[ai.reason] || 'Could not generate the action plan. Try again.') + '</p>';
+    }
+    out.innerHTML = '<div class="glass-card glow-border"><div class="card-title">' + icon('bot') + ' AI Action Plan · ' + escapeHtml(getMonthLabel(data.month || '')) + '</div>' + body + '</div>';
+    loadEntitlement();
+  }).catch(function() {
+    if (out) out.innerHTML = '<div class="glass-card"><p class="text-sm text-red">Could not generate the action plan. Try again.</p></div>';
+  });
+}
+
+function toggleTaskDone(cb) {
+  var row = cb.closest('tr');
+  if (row) row.classList.toggle('task-done', cb.checked);
 }
 
 /* Export helper */
@@ -1592,7 +2003,10 @@ function renderExecutiveReports() {
     html += '<div class="report-card-icon">' + icon(rt.iconName, { cls: 'icon-xl' }) + '</div>';
     html += '<div class="report-card-title">' + escapeHtml(rt.title) + '</div>';
     html += '<div class="report-card-desc">' + escapeHtml(rt.desc) + '</div>';
-    html += '<button class="btn-primary" onclick="generateReport(\'' + rt.id + '\')">Generate Report</button>';
+    html += '<div style="display:flex;gap:0.5rem;flex-wrap:wrap;">';
+    html += '<button class="btn-secondary btn-small" onclick="generateReport(\'' + rt.id + '\')">Preview</button>';
+    html += '<button class="btn-primary btn-small" onclick="downloadExecutiveReportPdf(\'' + rt.id + '\')">' + icon('download') + ' Download PDF</button>';
+    html += '</div>';
     html += '<div id="report-result-' + rt.id + '"></div>';
     html += '</div>';
   });
@@ -1626,6 +2040,65 @@ async function generateReport(reportType) {
   } catch (e) {
     resultEl.innerHTML = '<p class="text-red text-sm" style="margin-top:1rem;">Connection error.</p>';
   }
+}
+
+/* Download the branded PDF (gated: Free → upgrade modal; Pro → 20 credits; BYOK → free) */
+function downloadExecutiveReportPdf(reportType) {
+  var e = appState.entitlement;
+  // Snappy client-side pre-check (the server still enforces this).
+  if (e && !e.byok && e.plan === 'free') {
+    showUpgradeModal('PDF reports are available on the Professional or Custom AI plans.');
+    return;
+  }
+  showToast('Preparing your PDF…', 'info');
+  fetch('/api/executive-report/pdf', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ report_type: reportType })
+  }).then(function(res) {
+    var ct = res.headers.get('content-type') || '';
+    if (res.ok && ct.indexOf('application/pdf') !== -1) {
+      var cd = res.headers.get('content-disposition') || '';
+      var m = cd.match(/filename="?([^"]+)"?/);
+      var fname = m ? m[1] : 'finguard-report.pdf';
+      return res.blob().then(function(blob) {
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url; a.download = fname;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        showToast('Report downloaded.', 'success');
+        loadEntitlement(); /* credits may have changed */
+      });
+    }
+    return res.json().then(function(d) {
+      if (d.error === 'upgrade_required') showUpgradeModal(d.message || 'PDF reports are available on the Professional or Custom AI plans.');
+      else if (d.error === 'insufficient_credits') showUpgradeModal('You’ve used your AI credits this month. Upgrade to Professional or add your own API key to keep downloading PDF reports.');
+      else if (d.error === 'no_report') showToast('Run a monthly review first, then download.', 'warning');
+      else showToast('Could not generate the PDF: ' + (d.message || d.error || 'error'), 'error');
+    });
+  }).catch(function() { showToast('Could not download the PDF. Try again.', 'error'); });
+}
+
+function showUpgradeModal(message) {
+  closeUpgradeModal();
+  var wrap = document.createElement('div');
+  wrap.id = 'upgrade-modal';
+  wrap.className = 'modal-overlay';
+  wrap.innerHTML = '<div class="modal-card glass-card">' +
+    '<div class="modal-icon">' + icon('bot', { cls: 'icon-xl' }) + '</div>' +
+    '<h2>Unlock PDF reports</h2>' +
+    '<p class="text-sm text-muted">' + escapeHtml(message) + '</p>' +
+    '<div class="modal-actions">' +
+      '<button type="button" class="btn-primary btn-full" onclick="closeUpgradeModal();setPlan(\'pro\')">Upgrade to Professional</button>' +
+      '<button type="button" class="btn-secondary btn-full" onclick="closeUpgradeModal();navigate(\'settings\')">Add my own API key</button>' +
+      '<button type="button" class="btn-ghost" onclick="closeUpgradeModal()">Maybe later</button>' +
+    '</div></div>';
+  wrap.addEventListener('click', function(ev) { if (ev.target === wrap) closeUpgradeModal(); });
+  document.body.appendChild(wrap);
+}
+
+function closeUpgradeModal() {
+  var m = document.getElementById('upgrade-modal');
+  if (m) m.remove();
 }
 
 /* ── FinGuard AI (Chat) ────────────────────────────────────── */
@@ -1751,8 +2224,492 @@ async function sendChat() {
   }
 }
 
+/* ── Floating AI Assistant Drawer ────────────────────────────── */
+var AI_SUGGESTED = [
+  'Why is profit dropping?',
+  'What is our biggest risk?',
+  'Which customer should we follow up?',
+  'Why is cash running low?',
+  'What should I fix this week?'
+];
+
+function populateAiDrawer() {
+  var chips = document.getElementById('ai-drawer-chips');
+  if (chips) {
+    chips.innerHTML = AI_SUGGESTED.map(function(q) {
+      return '<button class="chat-chip" onclick="sendChatFromChip(this)" data-question="' + escapeHtml(q) + '">' + escapeHtml(q) + '</button>';
+    }).join('');
+  }
+  var feed = document.getElementById('chat-feed');
+  if (feed) {
+    if (appState.chatHistory.length === 0) {
+      feed.innerHTML = '<div class="empty-state" style="flex:1"><div class="empty-state-icon">' + icon('bot', { cls: 'icon-xl' }) + '</div><div class="empty-state-title">FinGuard AI</div><div class="empty-state-text">Ask me anything about your finances. I have full context from your latest analysis.</div></div>';
+    } else {
+      feed.innerHTML = appState.chatHistory.map(function(m) { return renderChatMessage(m.role, m.content); }).join('');
+    }
+    feed.scrollTop = feed.scrollHeight;
+  }
+}
+
+function toggleAiDrawer() {
+  var drawer = document.getElementById('ai-drawer');
+  var backdrop = document.getElementById('ai-drawer-backdrop');
+  if (!drawer) return;
+  var isOpen = drawer.classList.toggle('open');
+  drawer.setAttribute('aria-hidden', isOpen ? 'false' : 'true');
+  if (backdrop) backdrop.classList.toggle('hidden', !isOpen);
+  if (isOpen) {
+    populateAiDrawer();
+    var input = document.getElementById('chat-input');
+    if (input) setTimeout(function() { if (input) input.focus(); }, 50);
+  }
+}
+
 /* ── Settings ────────────────────────────────────────────────── */
+/* Plain-language guide for each contract: who the two organisations are and
+   what owner actions are available after deployment. */
+var CONTRACT_GUIDES = {
+  'treasury-guard-v1': {
+    yourRole: 'Your organisation owns the treasury and is the only one who can withdraw funds.',
+    theirRole: 'The counterparty organisation can pay funds into the treasury at any time. Every deposit and withdrawal is recorded permanently on-chain.',
+    counterpartyNote: 'The counterparty pays in by sending test AVAX to the contract address above from their own wallet.',
+    showStatus: true,
+    statusReader: async function(c) {
+      var bal = await c.balance();
+      var dep = await c.totalDeposited();
+      var wd = await c.totalWithdrawn();
+      return {
+        label: 'In treasury now: ' + ethers.formatEther(bal) + ' AVAX',
+        cls: bal > 0n ? 'text-emerald' : 'text-brand-bright',
+        lines: ['Total deposited: ' + ethers.formatEther(dep) + ' AVAX · Total withdrawn: ' + ethers.formatEther(wd) + ' AVAX'],
+        balance: bal
+      };
+    },
+    terminalCommands: function(addr, rpc) {
+      return [
+        { label: 'Send 0.1 test AVAX into the treasury (plain send — TreasuryGuard has receive())', cmd: 'cast send ' + addr + ' --value 0.1ether --rpc-url ' + rpc + ' --private-key <TOPSYY_KEY>' }
+      ];
+    },
+    actions: [
+      { id: 'deposit', kind: 'deposit', label: 'Send a deposit (from my wallet)', desc: 'Pay test AVAX into the treasury. Normally the counterparty does this from their wallet — this button lets you demo it.',
+        fields: [ { name: 'amount', label: 'Amount (AVAX)', type: 'etherText' } ] },
+      { id: 'withdraw', kind: 'call', method: 'withdraw', label: 'Withdraw funds', desc: 'Send AVAX out of the treasury (owner only).',
+        fields: [ { name: 'to', label: 'Send to address', type: 'address', fill: 'counterparty' }, { name: 'amount', label: 'Amount (AVAX)', type: 'ether' } ] },
+      { id: 'transfer', kind: 'call', method: 'transferOwnership', label: 'Transfer ownership to counterparty', desc: 'Hand control of the treasury to the other organisation.',
+        fields: [ { name: 'newOwner', label: 'New owner address', type: 'address', fill: 'counterparty' } ] }
+    ]
+  },
+  'invoice-vault-v1': {
+    yourRole: 'Your organisation records invoices and marks them paid. Records are tamper-proof once written.',
+    theirRole: 'The counterparty organisation is the other party to these invoices and can verify every record on the block explorer.',
+    counterpartyNote: 'Share the contract address so the counterparty can read and verify invoices on the explorer.',
+    actions: [
+      { id: 'record', kind: 'call', method: 'recordInvoice', label: 'Record an invoice', desc: 'Write a tamper-proof invoice record on-chain.',
+        fields: [ { name: 'ref', label: 'Invoice reference (text)', type: 'bytes32text' }, { name: 'amount', label: 'Amount', type: 'uint' } ] },
+      { id: 'transfer', kind: 'call', method: 'transferOwnership', label: 'Transfer ownership to counterparty', desc: 'Hand control of the registry to the other organisation.',
+        fields: [ { name: 'newOwner', label: 'New owner address', type: 'address', fill: 'counterparty' } ] }
+    ]
+  },
+  'finguard-escrow-v1': {
+    yourRole: 'Your organisation is the payee. You receive the funds when the counterparty releases them, or you can claim them yourself once the deadline passes.',
+    theirRole: 'The counterparty organisation is the payer. From their terminal wallet they deposit funds and then release them to you — or refund themselves before the deadline.',
+    counterpartyNote: 'The counterparty acts from their Avalanche terminal wallet. Share the contract address and the commands below with them.',
+    showStatus: true,
+    statusReader: async function(c) {
+      var released = await c.released();
+      var refunded = await c.refunded();
+      var dep = await c.totalDeposited();
+      var bal = await c.balance();
+      var label = released ? 'Released — paid to your organisation'
+        : refunded ? 'Refunded — returned to the payer'
+        : (bal > 0n ? 'Funded — awaiting release' : 'Deployed — awaiting deposit');
+      return {
+        label: label,
+        cls: released ? 'text-emerald' : refunded ? 'text-amber' : 'text-brand-bright',
+        lines: ['Total deposited: ' + ethers.formatEther(dep) + ' AVAX · In escrow now: ' + ethers.formatEther(bal) + ' AVAX'],
+        balance: bal
+      };
+    },
+    actions: [
+      { id: 'claim', kind: 'call', method: 'claimAfterDeadline', label: 'Claim funds (after deadline)', desc: 'If the counterparty never released and the deadline has passed, sweep the escrowed funds to your organisation.', fields: [] }
+    ],
+    terminalCommands: function(addr, rpc) {
+      return [
+        { label: '1. Deposit 0.1 test AVAX into the escrow', cmd: 'cast send ' + addr + ' "deposit()" --value 0.1ether --rpc-url ' + rpc + ' --private-key <TOPSYY_KEY>' },
+        { label: '2. Release the funds to your organisation', cmd: 'cast send ' + addr + ' "release()" --rpc-url ' + rpc + ' --private-key <TOPSYY_KEY>' },
+        { label: 'Or — refund yourself before the deadline', cmd: 'cast send ' + addr + ' "refund()" --rpc-url ' + rpc + ' --private-key <TOPSYY_KEY>' }
+      ];
+    }
+  }
+};
+
+function rpcFor(net) { return (net && net.rpcUrl) ? net.rpcUrl : 'https://api.avax-test.network/ext/bc/C/rpc'; }
+
+/* Save an on-chain money movement to the server ledger (for the monthly analysis). */
+function recordOnchainMovement(mv) {
+  return fetch('/api/avalanche/onchain/record', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(mv)
+  }).then(function(r) { return r.json(); }).catch(function() { return null; });
+}
+
+/* Total Balance card + wallet "My Card" (Fundex-style) */
+function renderBalancesSection() {
+  var h = '<div class="balances-row">';
+  h += '<div class="tb-card">';
+  h += '<div class="tb-head"><span class="tb-title">Total balance</span><span class="tb-chip"><span class="dot"></span>AVAX · Fuji</span></div>';
+  h += '<div class="tb-avail">' + icon('wallet') + ' Combined across wallet + contracts</div>';
+  h += '<div class="tb-big" id="bal-total">—</div>';
+  h += '<div class="tb-breakdown">';
+  h += '<div class="tb-brow"><span>' + icon('wallet') + ' Wallet</span><span id="bal-wallet">—</span></div>';
+  h += '<div class="tb-brow"><span>' + icon('shield') + ' Treasury</span><span id="bal-treasury">—</span></div>';
+  h += '<div class="tb-brow"><span>' + icon('briefcase') + ' Escrow</span><span id="bal-escrow">—</span></div>';
+  h += '</div>';
+  h += '<div class="tb-actions"><button class="tb-btn" onclick="loadBalances()">Refresh</button>' +
+    '<button class="tb-btn" onclick="window.open(\'https://faucet.avax.network/\',\'_blank\')">Get test AVAX</button></div>';
+  h += '</div>';
+
+  h += '<div class="glass-card"><div class="card-head"><div class="chart-title">My card</div></div>';
+  h += '<div class="wallet-card">';
+  h += '<div class="wallet-card-top"><div class="wallet-card-chip"></div><div class="wallet-card-brand">FinGuard</div></div>';
+  h += '<div class="wallet-card-number" id="wcard-number">Not connected</div>';
+  h += '<div class="wallet-card-foot">' +
+    '<div><div class="wallet-card-label">Network</div><div class="wallet-card-val" id="wcard-network">—</div></div>' +
+    '<div style="text-align:right"><div class="wallet-card-label">Balance</div><div class="wallet-card-val" id="wcard-balance">—</div></div></div>';
+  h += '</div></div>';
+
+  h += '</div>';
+  return h;
+}
+
+/* Find the most recently deployed treasury + escrow addresses from history. */
+async function latestContractAddresses() {
+  var res = { treasury: null, escrow: null };
+  try {
+    var r = await fetch('/api/avalanche/contracts/deployments');
+    var d = await r.json();
+    var items = d.items || d.deployments || [];
+    var valid = function(a) { return a && /^0x[0-9a-fA-F]{40}$/.test(a) && a.toLowerCase() !== '0x1234567890123456789012345678901234567890'; };
+    items.forEach(function(it) {
+      if (!it.ok || !valid(it.address)) return;
+      if (it.contract_name === 'TreasuryGuard') res.treasury = it.address; // later entries overwrite → latest wins
+      if (it.contract_name === 'FinGuardEscrow') res.escrow = it.address;
+    });
+  } catch (e) {}
+  return res;
+}
+
+/* Read wallet + treasury + escrow balances live from chain and fill the cards. */
+async function loadBalances() {
+  var w = FinGuardWallet.getState();
+  var net = (appState.networks || []).find(function(n) { return n.chainId === w.chainId; });
+  var fmt = function(wei) { try { return Number(ethers.formatEther(wei)).toLocaleString(undefined, { maximumFractionDigits: 4 }) + ' AVAX'; } catch (e) { return '0 AVAX'; } };
+  var set = function(id, v) { var el = document.getElementById(id); if (el) el.textContent = v; };
+  try {
+    var provider = FinGuardWallet.getReadProvider(rpcFor(net));
+    var walletBal = 0n;
+    if (w.address) { try { walletBal = await provider.getBalance(w.address); } catch (e) {} }
+    var addrs = await latestContractAddresses();
+    var treBal = 0n, escBal = 0n;
+    if (addrs.treasury) { try { treBal = await provider.getBalance(addrs.treasury); } catch (e) {} }
+    if (addrs.escrow) { try { escBal = await provider.getBalance(addrs.escrow); } catch (e) {} }
+
+    set('bal-total', fmt(walletBal + treBal + escBal));
+    set('bal-wallet', w.address ? fmt(walletBal) : 'Not connected');
+    set('bal-treasury', addrs.treasury ? fmt(treBal) : 'None deployed');
+    set('bal-escrow', addrs.escrow ? fmt(escBal) : 'None deployed');
+
+    set('wcard-number', w.address ? (w.address.slice(0, 6) + ' •••• •••• ' + w.address.slice(-4)) : 'Not connected');
+    set('wcard-network', net ? net.name : (w.address ? 'Unknown network' : '—'));
+    set('wcard-balance', w.address ? fmt(walletBal) : '—');
+  } catch (e) {
+    set('bal-total', '—');
+  }
+}
+
+/* Read live contract state from chain (works even for deposits/releases done in the terminal).
+   Each contract's guide provides a statusReader(contract) -> { label, cls, lines[], balance }. */
+async function refreshContractStatus(templateId, contractAddress, opts) {
+  opts = opts || {};
+  var el = document.getElementById('contract-status-body');
+  var guide = CONTRACT_GUIDES[templateId];
+  var template = (appState.contractTemplates || []).find(function(t) { return t.id === templateId; });
+  if (!guide || !guide.statusReader || !template) return;
+  if (el && !opts.quiet) el.innerHTML = '<span class="text-muted text-sm">Checking on-chain…</span>';
+  var w = FinGuardWallet.getState();
+  var net = (appState.networks || []).find(function(n) { return n.chainId === w.chainId; });
+  try {
+    var provider = FinGuardWallet.getReadProvider(rpcFor(net));
+    var c = new ethers.Contract(contractAddress, template.abi, provider);
+    var s = await guide.statusReader(c);
+
+    /* Notify when the balance has grown since the last check (a deposit arrived). */
+    appState.lastKnownBalance = appState.lastKnownBalance || {};
+    var prev = appState.lastKnownBalance[contractAddress];
+    if (prev != null && s.balance != null && s.balance > prev) {
+      showToast('💰 ' + ethers.formatEther(s.balance - prev) + ' AVAX received — ' + shortAddr(contractAddress), 'success');
+    }
+    if (s.balance != null) appState.lastKnownBalance[contractAddress] = s.balance;
+
+    if (el) {
+      el.innerHTML = '<div class="text-sm"><strong class="' + s.cls + '">' + escapeHtml(s.label) + '</strong></div>' +
+        (s.lines || []).map(function(l) { return '<div class="text-sm text-muted" style="margin-top:0.3rem;">' + escapeHtml(l) + '</div>'; }).join('');
+    }
+  } catch (e) {
+    if (el && !opts.quiet) el.innerHTML = '<span class="text-red text-sm">Could not read status: ' + escapeHtml((e && (e.shortMessage || e.message)) || 'error') + '</span>';
+  }
+}
+
+/* Poll the live status every 15s so terminal-side deposits show up (and notify) without a manual refresh. */
+function startStatusPolling(templateId, contractAddress) {
+  stopStatusPolling();
+  appState.statusPollId = setInterval(function() {
+    refreshContractStatus(templateId, contractAddress, { quiet: true });
+  }, 15000);
+}
+
+function stopStatusPolling() {
+  if (appState.statusPollId) { clearInterval(appState.statusPollId); appState.statusPollId = null; }
+}
+
+/* Verify any transaction hash succeeded on-chain (incl. terminal-submitted txs). */
+async function checkTxStatus() {
+  var input = document.getElementById('tx-verify-input');
+  var out = document.getElementById('tx-verify-result');
+  if (!input || !out) return;
+  var hash = input.value.trim();
+  if (!/^0x[0-9a-fA-F]{64}$/.test(hash)) {
+    out.innerHTML = '<span class="text-red text-sm">Enter a valid 0x transaction hash (66 characters).</span>';
+    return;
+  }
+  out.innerHTML = '<span class="text-muted text-sm">Looking up…</span>';
+  var w = FinGuardWallet.getState();
+  var net = (appState.networks || []).find(function(n) { return n.chainId === w.chainId; });
+  try {
+    var provider = FinGuardWallet.getReadProvider(rpcFor(net));
+    var receipt = await provider.getTransactionReceipt(hash);
+    if (!receipt) {
+      out.innerHTML = '<span class="text-amber text-sm">Not found yet — it may still be pending, or the hash is wrong.</span>';
+      return;
+    }
+    var link = net ? ' <a href="' + net.explorerUrl + '/tx/' + hash + '" target="_blank" rel="noopener" class="text-brand">View on explorer</a>' : '';
+    out.innerHTML = (receipt.status === 1)
+      ? '<span class="text-emerald text-sm">' + icon('check-circle') + ' Success — confirmed in block ' + receipt.blockNumber + '.' + link + '</span>'
+      : '<span class="text-red text-sm">Transaction failed (reverted) in block ' + receipt.blockNumber + '.' + link + '</span>';
+  } catch (e) {
+    out.innerHTML = '<span class="text-red text-sm">Lookup error: ' + escapeHtml((e && (e.shortMessage || e.message)) || 'error') + '</span>';
+  }
+}
+
+function getCounterparty() { return appState.counterpartyAddress || ''; }
+
+function setCounterpartyFromInput() {
+  var el = document.getElementById('contract-counterparty');
+  if (!el) return;
+  var v = el.value.trim();
+  appState.counterpartyAddress = v;
+  try { localStorage.setItem('finguard_counterparty', v); } catch (e) {}
+  var hint = document.getElementById('counterparty-hint');
+  if (hint) {
+    if (v && !ethers.isAddress(v)) hint.innerHTML = '<span class="text-red">Not a valid 0x wallet address</span>';
+    else if (v) hint.innerHTML = '<span class="text-emerald">Saved</span>';
+    else hint.innerHTML = '';
+  }
+}
+
+function setEscrowDeadlineFromInput() {
+  var el = document.getElementById('escrow-deadline-hours');
+  if (!el) return;
+  var h = Number(el.value);
+  if (h > 0) appState.escrowDeadlineSeconds = Math.round(h * 3600);
+}
+
+function shortAddr(a) { return a ? (a.slice(0, 6) + '…' + a.slice(-4)) : ''; }
+
+function copyToClipboard(text) {
+  if (navigator.clipboard) navigator.clipboard.writeText(text).then(function() { showToast('Copied to clipboard', 'info'); });
+}
+
+function copyCodeFromButton(btn) {
+  var row = btn.parentElement;
+  var code = row ? row.querySelector('code') : null;
+  if (code) copyToClipboard(code.textContent);
+}
+
+function convertContractField(type, raw) {
+  raw = (raw == null ? '' : String(raw)).trim();
+  if (type === 'address') {
+    if (!ethers.isAddress(raw)) throw new Error('Enter a valid 0x wallet address.');
+    return raw;
+  }
+  if (type === 'ether' || type === 'etherText') return ethers.parseEther(raw || '0');
+  if (type === 'uint') { if (!/^\d+$/.test(raw)) throw new Error('Enter a whole number.'); return BigInt(raw); }
+  if (type === 'bytes32text') { if (!raw) throw new Error('Enter an invoice reference.'); return ethers.id(raw); }
+  return raw;
+}
+
+function deployTxLink(net, hash) {
+  return net ? '<a href="' + net.explorerUrl + '/tx/' + hash + '" target="_blank" rel="noopener">View transaction</a>' : '';
+}
+
+/* Build constructor arguments for a template from its schema + the Contract Parties inputs. */
+function buildConstructorArgs(template) {
+  var schema = template.constructor_args_schema || template.constructorArgsSchema || [];
+  var cp = getCounterparty();
+  return schema.map(function(entry) {
+    if (entry.source === 'counterparty') {
+      if (!cp) throw new Error('Enter the counterparty wallet address in "Contract Parties" first.');
+      if (!ethers.isAddress(cp)) throw new Error('The counterparty address is not a valid 0x address.');
+      return cp;
+    }
+    if (entry.source === 'deadlineSeconds') {
+      var secs = Number(appState.escrowDeadlineSeconds);
+      if (!secs || isNaN(secs)) secs = entry.default || 86400;
+      return BigInt(secs);
+    }
+    if (entry.type === 'uint') return BigInt(entry.default || 0);
+    if (entry.type === 'address') return entry.default || ethers.ZeroAddress;
+    return entry.default;
+  });
+}
+
+function renderDeployedGuidePanel(templateId, contractAddress) {
+  var guide = CONTRACT_GUIDES[templateId] || { yourRole: '', theirRole: '', actions: [], counterpartyNote: '' };
+  var w = FinGuardWallet.getState();
+  var net = (appState.networks || []).find(function(n) { return n.chainId === w.chainId; });
+  var cp = getCounterparty();
+
+  var html = '<div class="deploy-status deploy-status-success">';
+  html += '<div class="text-emerald" style="display:flex;align-items:center;gap:0.4rem;font-weight:600;">' + icon('check-circle') + ' Deployed on-chain!</div>';
+  html += '<div style="display:flex;align-items:center;gap:0.5rem;margin-top:0.6rem;flex-wrap:wrap;">';
+  html += '<span class="wallet-address-chip">' + contractAddress + '</span>';
+  html += '<button type="button" class="btn-small" onclick="copyToClipboard(\'' + contractAddress + '\')">Copy address</button>';
+  if (net) html += '<a href="' + net.explorerUrl + '/address/' + contractAddress + '" target="_blank" rel="noopener" class="text-sm text-brand">Explorer →</a>';
+  html += '</div>';
+
+  html += '<div class="guide-roles">';
+  html += '<div class="guide-role"><div class="guide-role-tag">Your organisation ' + (w.address ? '(' + shortAddr(w.address) + ')' : '') + '</div><p class="text-sm text-muted">' + escapeHtml(guide.yourRole) + '</p></div>';
+  html += '<div class="guide-role"><div class="guide-role-tag">Counterparty ' + (cp ? '(' + shortAddr(cp) + ')' : '') + '</div><p class="text-sm text-muted">' + escapeHtml(guide.theirRole) + '</p></div>';
+  html += '</div>';
+  if (guide.counterpartyNote) html += '<p class="text-xs text-muted" style="margin-top:0.6rem;">' + escapeHtml(guide.counterpartyNote) + '</p>';
+
+  if (guide.actions && guide.actions.length) {
+    html += '<div class="guide-actions">';
+    guide.actions.forEach(function(a) {
+      html += '<div class="guide-action"><div class="guide-action-head">' + escapeHtml(a.label) + '</div>';
+      if (a.desc) html += '<p class="text-xs text-muted" style="margin-bottom:0.5rem;">' + escapeHtml(a.desc) + '</p>';
+      html += '<div class="guide-action-fields">';
+      (a.fields || []).forEach(function(f) {
+        var val = (f.fill === 'counterparty' && cp) ? cp : '';
+        html += '<input class="settings-input" id="act-' + templateId + '-' + a.id + '-' + f.name + '" placeholder="' + escapeHtml(f.label) + '" value="' + escapeHtml(val) + '" />';
+      });
+      html += '<button type="button" class="btn-primary btn-small" onclick="runOwnerAction(\'' + templateId + '\',\'' + a.id + '\',\'' + contractAddress + '\')">Run</button>';
+      html += '</div><div id="act-result-' + templateId + '-' + a.id + '" style="margin-top:0.5rem;"></div></div>';
+    });
+    html += '</div>';
+  }
+
+  if (guide.showStatus) {
+    html += '<div class="guide-terminal"><div class="guide-action-head">Live on-chain status</div>' +
+      '<div id="contract-status-body" class="text-sm text-muted">Checking…</div>' +
+      '<button type="button" class="btn-small" style="margin-top:0.5rem;" onclick="refreshContractStatus(\'' + templateId + '\',\'' + contractAddress + '\')">Refresh now</button>' +
+      '<span class="text-xs text-muted" style="margin-left:0.5rem;">Auto-updates every 15s.</span></div>';
+  }
+
+  if (typeof guide.terminalCommands === 'function') {
+    var rpc = (net && net.rpcUrl) ? net.rpcUrl : 'https://api.avax-test.network/ext/bc/C/rpc';
+    var cmds = guide.terminalCommands(contractAddress, rpc);
+    html += '<div class="guide-terminal"><div class="guide-action-head">Counterparty terminal commands' + (cp ? ' (run as ' + shortAddr(cp) + ')' : '') + '</div>';
+    html += '<p class="text-xs text-muted" style="margin-bottom:0.6rem;">Get the key with <span class="mono">avalanche key export Topsyy</span>, then run these from your terminal:</p>';
+    cmds.forEach(function(c) {
+      html += '<div class="guide-cmd"><div class="text-xs text-muted" style="margin-bottom:0.2rem;">' + escapeHtml(c.label) + '</div>' +
+        '<div class="guide-cmd-row"><code>' + escapeHtml(c.cmd) + '</code>' +
+        '<button type="button" class="btn-small" onclick="copyCodeFromButton(this)">Copy</button></div></div>';
+    });
+    html += '</div>';
+  }
+
+  html += '</div>';
+  return html;
+}
+
+async function runOwnerAction(templateId, actionId, contractAddress) {
+  var guide = CONTRACT_GUIDES[templateId];
+  var template = (appState.contractTemplates || []).find(function(t) { return t.id === templateId; });
+  if (!guide || !template) return;
+  var action = guide.actions.filter(function(a) { return a.id === actionId; })[0];
+  if (!action) return;
+
+  var resultEl = document.getElementById('act-result-' + templateId + '-' + actionId);
+  var w = FinGuardWallet.getState();
+  var net = (appState.networks || []).find(function(n) { return n.chainId === w.chainId; });
+  var pending = function(msg) { if (resultEl) resultEl.innerHTML = '<div class="deploy-status"><p class="text-sm text-muted">' + msg + '</p></div>'; };
+  var succeed = function(msg, hash) {
+    if (resultEl) resultEl.innerHTML = '<div class="deploy-status deploy-status-success"><p class="text-sm text-emerald">' + icon('check-circle') + ' ' + escapeHtml(msg) + '</p>' + (net ? '<p class="text-xs" style="margin-top:0.3rem;">' + deployTxLink(net, hash) + '</p>' : '') + '</div>';
+  };
+
+  try {
+    var handle;
+    var raws = {};
+    var depositAmount = '0';
+    var claimAmount = '0';
+
+    if (action.kind === 'deposit') {
+      var amtEl = document.getElementById('act-' + templateId + '-' + actionId + '-amount');
+      depositAmount = (amtEl && amtEl.value) || '0';
+      pending('Approve the deposit in your wallet…');
+      handle = await FinGuardWallet.sendNative(contractAddress, depositAmount);
+    } else {
+      var args = [];
+      action.fields.forEach(function(f) {
+        var raw = (document.getElementById('act-' + templateId + '-' + actionId + '-' + f.name) || {}).value;
+        raws[f.name] = raw;
+        args.push(convertContractField(f.type, raw));
+      });
+      // For a claim, the amount moved is whatever is sitting in the contract right now.
+      if (action.method === 'claimAfterDeadline') {
+        try {
+          var prov = FinGuardWallet.getReadProvider(rpcFor(net));
+          claimAmount = ethers.formatEther(await prov.getBalance(contractAddress));
+        } catch (e) {}
+      }
+      pending('Approve the transaction in your wallet…');
+      handle = await FinGuardWallet.callContract(contractAddress, template.abi, action.method, args);
+    }
+    pending('Confirming on-chain… ' + deployTxLink(net, handle.txHash));
+    await handle.wait();
+    succeed(action.label + ' complete.', handle.txHash);
+    showToast(action.label + ' complete.', 'success');
+
+    /* Save the money movement to the ledger so it flows into the monthly analysis. */
+    var mv = null;
+    if (action.kind === 'deposit') mv = { kind: 'deposit', from: w.address, to: contractAddress, amount: depositAmount };
+    else if (action.method === 'withdraw') mv = { kind: 'withdraw', from: contractAddress, to: raws.to || '', amount: raws.amount || '0' };
+    else if (action.method === 'claimAfterDeadline') mv = { kind: 'claim', from: contractAddress, to: w.address, amount: claimAmount };
+    if (mv) {
+      mv.contractName = template.contract_name;
+      mv.contractAddress = contractAddress;
+      mv.txHash = handle.txHash;
+      mv.chainId = w.chainId;
+      mv.wallet = w.address;
+      mv.month = appState.activeMonth || null;
+      recordOnchainMovement(mv);
+    }
+
+    loadContractDeploymentHistory();
+    loadBalances();
+  } catch (e) {
+    var msg = (e && (e.reason || e.shortMessage || e.message)) || 'Action failed.';
+    if (resultEl) resultEl.innerHTML = '<div class="deploy-status deploy-status-error"><p class="text-sm text-red">' + escapeHtml(msg) + '</p></div>';
+    showToast('Action failed: ' + msg, 'error');
+  }
+}
+
 function renderContracts() {
+  if (appState.counterpartyAddress == null) {
+    try { appState.counterpartyAddress = localStorage.getItem('finguard_counterparty') || ''; } catch (e) { appState.counterpartyAddress = ''; }
+  }
   var html = '';
 
   html += '<div id="contracts-wallet-panel" class="section-gap"></div>';
@@ -1761,6 +2718,24 @@ function renderContracts() {
   html += '<div class="card-title">Network &amp; Balance</div>';
   html += '<div id="contracts-network-panel"></div>';
   html += '</div>';
+
+  html += renderBalancesSection();
+
+  html += '<div class="glass-card section-gap">';
+  html += '<div class="card-title">Contract Parties</div>';
+  html += '<div class="guide-roles">';
+  html += '<div class="guide-role"><div class="guide-role-tag">Your organisation</div>' +
+    '<p class="text-sm text-muted">Your connected browser wallet. It deploys and owns the contract, and pays the network fee.</p>' +
+    '<div id="parties-your-wallet" class="text-xs mono text-muted" style="margin-top:0.4rem;">Not connected — connect your wallet above.</div></div>';
+  html += '<div class="guide-role"><div class="guide-role-tag">Counterparty organisation</div>' +
+    '<p class="text-sm text-muted">The other organisation wallet address (for example, your terminal wallet). Used to pre-fill deposit, withdrawal and ownership actions.</p>' +
+    '<input class="settings-input" id="contract-counterparty" placeholder="0x..." style="margin-top:0.4rem;max-width:100%;" oninput="setCounterpartyFromInput()" value="' + escapeHtml(getCounterparty()) + '" />' +
+    '<div id="counterparty-hint" class="text-xs" style="margin-top:0.3rem;"></div>' +
+    '<label class="settings-label" style="display:block;margin-top:0.7rem;">Escrow deadline (hours)</label>' +
+    '<input class="settings-input" id="escrow-deadline-hours" type="number" min="1" placeholder="24" style="max-width:140px;" value="' + (appState.escrowDeadlineSeconds ? Math.round(appState.escrowDeadlineSeconds / 3600) : 24) + '" oninput="setEscrowDeadlineFromInput()" />' +
+    '<div class="text-xs text-muted" style="margin-top:0.2rem;">Two-Party Escrow only: after this window, your org can claim unreleased funds.</div>' +
+    '</div>';
+  html += '</div></div>';
 
   html += '<div class="section-title">Deploy a Contract</div>';
   html += '<p class="text-sm text-muted" style="margin-bottom:1rem;">Pick what you want to set up. Your connected wallet signs the deployment and pays the network fee — nothing happens without your approval.</p>';
@@ -1785,6 +2760,14 @@ function renderContracts() {
   html += '</div>';
   html += '<div id="contract-deploy-result" class="contract-deploy-result"></div>';
   html += '</div>';
+  html += '</div>';
+
+  html += '<div class="glass-card section-gap">';
+  html += '<div class="card-title">Verify a Transaction</div>';
+  html += '<p class="text-sm text-muted" style="margin-bottom:0.6rem;">Paste any transaction hash — including deposits or releases done from the terminal — to confirm it succeeded on-chain.</p>';
+  html += '<div class="guide-action-fields"><input class="settings-input" id="tx-verify-input" placeholder="0x… transaction hash" style="flex:1;max-width:100%;" />' +
+    '<button type="button" class="btn-primary btn-small" onclick="checkTxStatus()">Check</button></div>';
+  html += '<div id="tx-verify-result" class="text-sm" style="margin-top:0.5rem;"></div>';
   html += '</div>';
 
   html += '<div class="glass-card">';
@@ -1819,6 +2802,14 @@ function renderContracts() {
       else panel.classList.add('hidden');
     });
   }
+
+  /* Show connected wallet as "your organisation" + validate counterparty */
+  var w = FinGuardWallet.getState();
+  var yourEl = document.getElementById('parties-your-wallet');
+  if (yourEl && w.address) yourEl.textContent = w.address;
+  setCounterpartyFromInput();
+  setEscrowDeadlineFromInput();
+  loadBalances();
 }
 
 async function renderContractTemplateGallery() {
@@ -1842,6 +2833,12 @@ async function renderContractTemplateGallery() {
       html += '<div class="report-card-icon">' + icon(t.icon || 'file-text', { cls: 'icon-xl' }) + '</div>';
       html += '<div class="report-card-title">' + escapeHtml(t.label) + '</div>';
       html += '<div class="report-card-desc">' + escapeHtml(t.description) + '</div>';
+      var g = CONTRACT_GUIDES[t.id];
+      if (g) {
+        html += '<div class="guide-mini">' +
+          '<span class="guide-mini-row"><strong>Your org:</strong> ' + escapeHtml(g.yourRole) + '</span>' +
+          '<span class="guide-mini-row"><strong>Counterparty:</strong> ' + escapeHtml(g.theirRole) + '</span></div>';
+      }
       html += '<button class="btn-primary" onclick="handleDeployTemplateClick(\'' + t.id + '\')">' + icon('wallet') + ' Deploy with My Wallet</button>';
       html += '<div id="deploy-status-' + t.id + '"></div>';
       html += '</div>';
@@ -1864,9 +2861,23 @@ async function handleDeployTemplateClick(templateId) {
     return;
   }
 
+  var cp = getCounterparty();
+  if (cp && !ethers.isAddress(cp)) {
+    showToast('The counterparty address is not a valid 0x address. Fix or clear it.', 'warning');
+    return;
+  }
+
   var template = (appState.contractTemplates || []).find(function(t) { return t.id === templateId; });
   if (!template) {
     showToast('Template not found.', 'error');
+    return;
+  }
+
+  var ctorArgs;
+  try {
+    ctorArgs = buildConstructorArgs(template);
+  } catch (e) {
+    showToast(e.message, 'warning');
     return;
   }
 
@@ -1881,7 +2892,7 @@ async function handleDeployTemplateClick(templateId) {
   }
 
   try {
-    var deployment = await FinGuardWallet.deployTemplate(template, []);
+    var deployment = await FinGuardWallet.deployTemplate(template, ctorArgs);
 
     if (statusEl) {
       statusEl.innerHTML = '<div class="deploy-status"><div class="loading-shimmer" style="height:44px"></div>' +
@@ -1893,13 +2904,15 @@ async function handleDeployTemplateClick(templateId) {
     var result = await deployment.wait();
 
     if (statusEl) {
-      statusEl.innerHTML = '<div class="deploy-status deploy-status-success">' +
-        '<div class="text-emerald" style="display:flex;align-items:center;gap:0.4rem;font-weight:600;">' +
-        icon('check-circle') + ' Deployed!</div>' +
-        '<div class="wallet-address-chip" style="margin-top:0.5rem;">' + result.address + '</div>' +
-        (net ? '<a href="' + net.explorerUrl + '/address/' + result.address + '" target="_blank" rel="noopener" class="text-sm text-brand">View on block explorer →</a>' : '') +
-        '</div>';
+      statusEl.innerHTML = renderDeployedGuidePanel(templateId, result.address);
     }
+    if (CONTRACT_GUIDES[templateId] && CONTRACT_GUIDES[templateId].showStatus) {
+      appState.lastKnownBalance = appState.lastKnownBalance || {};
+      delete appState.lastKnownBalance[result.address];
+      refreshContractStatus(templateId, result.address);
+      startStatusPolling(templateId, result.address);
+    }
+    loadBalances();
 
     showToast(template.label + ' deployed successfully!', 'success');
 
@@ -1912,7 +2925,8 @@ async function handleDeployTemplateClick(templateId) {
         contractAddress: result.address,
         txHash: deployment.txHash,
         chainId: w.chainId,
-        deployerAddress: w.address
+        deployerAddress: w.address,
+        counterpartyAddress: getCounterparty()
       })
     }).then(function() { loadContractDeploymentHistory(); }).catch(function() {});
 
@@ -1925,91 +2939,307 @@ async function handleDeployTemplateClick(templateId) {
   }
 }
 
+/* ── Custom Financial Rules (Settings → Financial Rules) ─────── */
+function loadRules() {
+  var el = document.getElementById('rules-panel-body');
+  if (!el) return;
+  fetch('/api/rules').then(function(r) { return r.json(); }).then(function(d) {
+    if (!d || !d.ok) { el.innerHTML = '<p class="text-sm text-red">Could not load rules.</p>'; return; }
+    appState.rulesData = d;
+    renderRulesPanel();
+  }).catch(function() { if (el) el.innerHTML = '<p class="text-sm text-red">Could not load rules.</p>'; });
+}
+
+function ruleSummary(rule) {
+  var c = rule.condition || {};
+  switch (c.type) {
+    case 'expense_over': return 'Transaction above ' + formatCurrency(c.amount);
+    case 'cash_below': return 'Cash balance below ' + formatCurrency(c.amount);
+    case 'vendor_payment_over': return 'Vendor payment above ' + formatCurrency(c.amount);
+    case 'duplicate_payment': return 'Duplicate payment (reuses engine)';
+    case 'weekend_transaction': return 'Weekend transaction';
+    case 'director_expense': return 'Director / owner expense';
+    case 'unknown_supplier': return 'Unknown / one-off supplier';
+    case 'keyword': return 'Keyword: "' + (c.keyword || '') + '"';
+    default: return c.type || 'Rule';
+  }
+}
+
+function renderRulesPanel() {
+  var el = document.getElementById('rules-panel-body');
+  var d = appState.rulesData;
+  if (!el || !d) return;
+
+  // Free (read-only): examples + upgrade prompt.
+  if (!d.can_manage) {
+    var hf = '<p class="text-sm text-muted" style="margin-bottom:1rem;">Custom rules are available on <strong>Professional</strong> and <strong>Custom AI</strong>. Examples of what you could set up:</p><div class="rules-list">';
+    d.examples.forEach(function(ex) {
+      hf += '<div class="rule-row rule-example"><div class="rule-row-main">' +
+        '<div class="rule-row-name">' + escapeHtml(ex.name) + ' <span class="' + severityClass(ex.severity) + '">' + escapeHtml(ex.severity) + '</span></div>' +
+        '<div class="rule-row-sub">' + escapeHtml(ex.description) + ' · action: ' + escapeHtml(ex.action.replace(/_/g, ' ')) + '</div></div></div>';
+    });
+    hf += '</div><div class="rules-upgrade"><button type="button" class="btn-primary" onclick="setPlan(\'pro\')">Upgrade to create rules</button>' +
+      '<button type="button" class="btn-secondary" onclick="switchSettingsSection(\'assistant\')">Add my own API key</button></div>';
+    el.innerHTML = hf;
+    return;
+  }
+
+  var typeOpts = d.rule_types.map(function(t) { return '<option value="' + t.key + '">' + escapeHtml(t.label) + '</option>'; }).join('');
+  var sevOpts = d.severities.map(function(s) { return '<option value="' + s + '">' + s + '</option>'; }).join('');
+  var actOpts = d.actions.map(function(a) { return '<option value="' + a + '">' + a.replace(/_/g, ' ') + '</option>'; }).join('');
+
+  var h = '<div class="rules-list" id="rules-list">';
+  if (!d.rules.length) h += '<p class="text-sm text-muted">No rules yet — create one below or start from a template.</p>';
+  d.rules.forEach(function(rule) {
+    h += '<div class="rule-row">' +
+      '<label class="rule-toggle"><input type="checkbox" ' + (rule.enabled !== false ? 'checked' : '') + ' onchange="toggleRule(\'' + rule.id + '\', this.checked)"></label>' +
+      '<div class="rule-row-main"><div class="rule-row-name">' + escapeHtml(rule.name) + ' <span class="' + severityClass(rule.severity) + '">' + escapeHtml(rule.severity) + '</span></div>' +
+      '<div class="rule-row-sub">' + escapeHtml(ruleSummary(rule)) + ' · action: ' + escapeHtml((rule.action || 'flag').replace(/_/g, ' ')) + (rule.enabled === false ? ' · disabled' : '') + '</div></div>' +
+      '<button type="button" class="btn-small btn-danger" onclick="deleteRule(\'' + rule.id + '\')">Delete</button></div>';
+  });
+  h += '</div>';
+
+  h += '<div class="rules-templates"><span class="text-xs text-muted">Start from a template:</span> ';
+  d.examples.forEach(function(ex, i) { h += '<button type="button" class="chat-chip" onclick="useRuleTemplate(' + i + ')">' + escapeHtml(ex.name) + '</button>'; });
+  h += '</div>';
+
+  h += '<div class="rules-form"><div class="settings-card-head" style="margin-bottom:0.75rem;"><h3>Create a rule</h3></div><div class="settings-fields">';
+  h += '<div class="settings-group full"><label class="settings-label">Name</label><input class="settings-input" id="rule-name" placeholder="e.g. Large expense" /></div>';
+  h += '<div class="settings-group full"><label class="settings-label">Description</label><input class="settings-input" id="rule-desc" placeholder="Optional" /></div>';
+  h += '<div class="settings-group"><label class="settings-label">Condition</label><select class="settings-input" id="rule-type" onchange="onRuleTypeChange()">' + typeOpts + '</select></div>';
+  h += '<div class="settings-group" id="rule-param-group"><label class="settings-label" id="rule-param-label">Amount (KES)</label><input class="settings-input" id="rule-amount" type="number" min="1" placeholder="e.g. 200000" /><input class="settings-input hidden" id="rule-keyword" placeholder="keyword" /></div>';
+  h += '<div class="settings-group"><label class="settings-label">Severity</label><select class="settings-input" id="rule-severity">' + sevOpts + '</select></div>';
+  h += '<div class="settings-group"><label class="settings-label">Action</label><select class="settings-input" id="rule-action">' + actOpts + '</select></div>';
+  h += '</div>';
+  h += '<div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-top:0.5rem;"><button type="button" class="btn-secondary btn-small" onclick="previewRuleForm()">Preview trigger</button><button type="button" class="btn-primary btn-small" onclick="saveRule()">Save rule</button></div>';
+  h += '<div id="rule-preview-result" class="text-sm" style="margin-top:0.6rem;"></div></div>';
+
+  h += '<div class="rules-history" id="rules-history"></div>';
+
+  el.innerHTML = h;
+  onRuleTypeChange();
+  loadRuleHistory();
+}
+
+function onRuleTypeChange() {
+  var d = appState.rulesData; if (!d) return;
+  var sel = document.getElementById('rule-type'); if (!sel) return;
+  var t = d.rule_types.filter(function(x) { return x.key === sel.value; })[0] || {};
+  var amount = document.getElementById('rule-amount');
+  var keyword = document.getElementById('rule-keyword');
+  var label = document.getElementById('rule-param-label');
+  var group = document.getElementById('rule-param-group');
+  if (t.input === 'amount') { amount.classList.remove('hidden'); keyword.classList.add('hidden'); label.textContent = 'Amount (KES)'; group.style.display = ''; }
+  else if (t.input === 'keyword') { keyword.classList.remove('hidden'); amount.classList.add('hidden'); label.textContent = 'Keyword'; group.style.display = ''; }
+  else { amount.classList.add('hidden'); keyword.classList.add('hidden'); group.style.display = 'none'; }
+}
+
+function readRuleForm() {
+  var g = function(id) { var e = document.getElementById(id); return e ? e.value : ''; };
+  var type = g('rule-type');
+  var d = appState.rulesData;
+  var t = d && d.rule_types.filter(function(x) { return x.key === type; })[0];
+  var cond = { type: type };
+  if (t && t.input === 'amount') cond.amount = Number(g('rule-amount'));
+  if (t && t.input === 'keyword') cond.keyword = g('rule-keyword');
+  return { name: g('rule-name'), description: g('rule-desc'), severity: g('rule-severity'), action: g('rule-action'), condition: cond, enabled: true };
+}
+
+function previewRuleForm() {
+  var out = document.getElementById('rule-preview-result');
+  if (out) out.innerHTML = '<span class="text-muted">Checking against the current month…</span>';
+  fetch('/api/rules/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(readRuleForm()) })
+    .then(function(r) { return r.json(); }).then(function(d) {
+      if (!out) return;
+      if (!d.ok) { out.innerHTML = '<span class="text-red">' + escapeHtml(d.message || 'Invalid rule') + '</span>'; return; }
+      var p = d.preview;
+      if (p.no_data) { out.innerHTML = '<span class="text-muted">Run a monthly review first to preview against real data.</span>'; return; }
+      var s = '<span class="' + (p.matchCount > 0 ? 'text-amber' : 'text-emerald') + '">Would match <strong>' + p.matchCount + '</strong> item' + (p.matchCount === 1 ? '' : 's') + ' this month.</span>';
+      if (p.samples && p.samples.length) s += '<ul style="margin:0.4rem 0 0;padding-left:1.2rem;">' + p.samples.map(function(x) { return '<li class="text-xs text-muted">' + escapeHtml(x) + '</li>'; }).join('') + '</ul>';
+      out.innerHTML = s;
+    }).catch(function() { if (out) out.innerHTML = '<span class="text-red">Preview failed.</span>'; });
+}
+
+function saveRule() {
+  fetch('/api/rules', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(readRuleForm()) })
+    .then(function(r) { return r.json(); }).then(function(d) {
+      if (d.ok) { showToast('Rule saved.', 'success'); loadRules(); }
+      else if (d.error === 'upgrade_required') showUpgradeModal(d.message || 'Custom rules are available on Professional or Custom AI.');
+      else showToast(d.message || 'Could not save rule.', 'error');
+    }).catch(function() { showToast('Could not save rule.', 'error'); });
+}
+
+function toggleRule(id, enabled) {
+  fetch('/api/rules/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: enabled }) })
+    .then(function(r) { return r.json(); }).then(function(d) { if (d.ok) showToast('Rule ' + (enabled ? 'enabled' : 'disabled') + '.', 'info'); });
+}
+
+function deleteRule(id) {
+  fetch('/api/rules/' + id, { method: 'DELETE' }).then(function(r) { return r.json(); }).then(function(d) { if (d.ok) { showToast('Rule deleted.', 'info'); loadRules(); } });
+}
+
+function useRuleTemplate(i) {
+  var d = appState.rulesData; if (!d || !d.examples[i]) return;
+  var ex = d.examples[i];
+  var set = function(id, v) { var e = document.getElementById(id); if (e) e.value = v; };
+  set('rule-name', ex.name); set('rule-desc', ex.description); set('rule-severity', ex.severity); set('rule-action', ex.action); set('rule-type', ex.condition.type);
+  onRuleTypeChange();
+  if (ex.condition.amount) set('rule-amount', ex.condition.amount);
+  if (ex.condition.keyword) set('rule-keyword', ex.condition.keyword);
+}
+
+function loadRuleHistory() {
+  var el = document.getElementById('rules-history'); if (!el) return;
+  fetch('/api/rules/history').then(function(r) { return r.json(); }).then(function(d) {
+    if (!d.ok || !d.history.length) { el.innerHTML = ''; return; }
+    var h = '<div class="settings-card-head" style="margin-top:1.5rem;margin-bottom:0.5rem;"><h3>Rule execution history</h3></div>';
+    h += '<table class="data-table"><thead><tr><th>When</th><th>Month</th><th>Rule</th><th>Matches</th></tr></thead><tbody>';
+    d.history.forEach(function(run) {
+      (run.results || []).forEach(function(res) {
+        h += '<tr><td class="text-xs text-muted">' + escapeHtml((run.at || '').slice(0, 16).replace('T', ' ')) + '</td><td class="text-sm">' + escapeHtml(run.month || '—') + '</td><td class="text-sm">' + escapeHtml(res.ruleName || '—') + '</td><td class="text-sm">' + (res.matchCount || 0) + '</td></tr>';
+      });
+    });
+    h += '</tbody></table>';
+    el.innerHTML = h;
+  }).catch(function() {});
+}
+
 function renderSettings() {
-  var html = '<div class="grid-2col">';
+  var active = appState.settingsSection || 'profile';
+  var navItems = [
+    { key: 'profile',      label: 'Profile' },
+    { key: 'plan',         label: 'Plan & Credits' },
+    { key: 'rules',        label: 'Financial Rules' },
+    { key: 'integrations', label: 'Integrations' },
+    { key: 'assistant',    label: 'AI Assistant' },
+    { key: 'alerts',       label: 'Risk & Alerts' },
+    { key: 'access',       label: 'Access' }
+  ];
 
-  /* Left column */
-  html += '<div>';
+  function cardHead(title, desc) {
+    return '<div class="settings-card-head"><h3>' + escapeHtml(title) + '</h3>' +
+      (desc ? '<p>' + escapeHtml(desc) + '</p>' : '') + '</div>';
+  }
+  function field(label, control, full) {
+    return '<div class="settings-group' + (full ? ' full' : '') + '"><label class="settings-label">' +
+      escapeHtml(label) + '</label>' + control + '</div>';
+  }
 
-  html += '<div class="glass-card section-gap">';
-  html += '<div class="card-title">Business Profile</div>';
-  html += '<div class="settings-group"><label class="settings-label">Name</label><input type="text" class="settings-input" id="settings-name" value="' + escapeHtml(appState.userName) + '" /></div>';
-  html += '<div class="settings-group"><label class="settings-label">Company</label><input type="text" class="settings-input" id="settings-company" value="' + escapeHtml(appState.businessName) + '" /></div>';
+  var html = '<div class="settings-layout">';
+
+  /* Left section nav */
+  html += '<nav class="settings-nav">';
+  navItems.forEach(function(n) {
+    html += '<button type="button" class="settings-nav-item' + (n.key === active ? ' active' : '') +
+      '" data-sec="' + n.key + '" onclick="switchSettingsSection(\'' + n.key + '\')">' + escapeHtml(n.label) + '</button>';
+  });
+  html += '</nav>';
+
+  /* Right body */
+  html += '<div class="settings-body">';
+
+  /* ── Profile ── */
+  html += '<div class="settings-panel' + (active === 'profile' ? ' active' : '') + '" data-section="profile">';
+  html += '<div class="glass-card">' + cardHead('Personal Information', 'This information appears on your reports and dashboard.') +
+    '<div class="settings-fields">' +
+      field('Your Name', '<input type="text" class="settings-input" id="settings-name" value="' + escapeHtml(appState.userName) + '" />') +
+      field('Company Name', '<input type="text" class="settings-input" id="settings-company" value="' + escapeHtml(appState.businessName) + '" />') +
+    '</div></div>';
   html += '</div>';
 
-  html += '<div class="glass-card section-gap">';
-  html += '<div class="card-title">Zoho Books</div>';
-  html += '<div id="settings-zoho-panel"></div>';
+  /* ── Plan & Credits ── */
+  html += '<div class="settings-panel' + (active === 'plan' ? ' active' : '') + '" data-section="plan">';
+  html += '<div class="glass-card">' + cardHead('Plan & AI Credits', 'Your subscription and how much AI narration you have this month. The computed analysis is always free.') +
+    '<div id="plan-panel-body"><p class="text-sm text-muted">Loading plan…</p></div></div>';
   html += '</div>';
 
-  html += '<div class="glass-card section-gap">';
-  html += '<div class="card-title">Avalanche Wallet</div>';
-  html += '<div id="settings-wallet-panel"></div>';
+  /* ── Financial Rules ── */
+  html += '<div class="settings-panel' + (active === 'rules' ? ' active' : '') + '" data-section="rules">';
+  html += '<div class="glass-card">' + cardHead('Custom Financial Rules', 'Define your own policies. Matches feed straight into the risk engine and show up as findings on your dashboard and reports.') +
+    '<div id="rules-panel-body"><p class="text-sm text-muted">Loading rules…</p></div></div>';
   html += '</div>';
 
+  /* ── Integrations ── */
+  html += '<div class="settings-panel' + (active === 'integrations' ? ' active' : '') + '" data-section="integrations">';
+  html += '<div class="glass-card">' + cardHead('Zoho Books', 'Connect your accounting data source for automatic monthly sync.') +
+    '<div id="settings-zoho-panel"></div></div>';
+  html += '<div class="glass-card">' + cardHead('Avalanche Wallet', 'Optional on-chain identity for contract deployment workflows.') +
+    '<div id="settings-wallet-panel"></div></div>';
   html += '</div>';
 
-  /* Right column */
-  html += '<div>';
-
-  html += '<div class="glass-card section-gap">';
-  html += '<div class="card-title">AI API &amp; Assistant</div>';
-  html += '<div class="settings-group"><label class="settings-label">AI Provider</label>' +
-    '<select class="settings-input" id="settings-ai-provider">' +
+  /* ── AI Assistant ── */
+  var aiKeyPlaceholder = appState.aiApiKeyConfigured
+    ? 'Saved — leave blank to keep, or enter a new key to replace it'
+    : 'Enter AI API Key';
+  var providerControl = '<select class="settings-input" id="settings-ai-provider">' +
       '<option value="openai"' + (appState.aiProvider === 'openai' ? ' selected' : '') + '>OpenAI</option>' +
       '<option value="anthropic"' + (appState.aiProvider === 'anthropic' ? ' selected' : '') + '>Anthropic (Claude)</option>' +
       '<option value="google"' + (appState.aiProvider === 'google' ? ' selected' : '') + '>Google (Gemini)</option>' +
       '<option value="deepseek"' + (appState.aiProvider === 'deepseek' ? ' selected' : '') + '>DeepSeek</option>' +
+      '<option value="mistral"' + (appState.aiProvider === 'mistral' ? ' selected' : '') + '>Mistral AI</option>' +
       '<option value="grok"' + (appState.aiProvider === 'grok' ? ' selected' : '') + '>Grok (xAI)</option>' +
       '<option value="nvidia"' + (appState.aiProvider === 'nvidia' ? ' selected' : '') + '>NVIDIA NIM</option>' +
       '<option value="azure-openai"' + (appState.aiProvider === 'azure-openai' ? ' selected' : '') + '>Azure OpenAI</option>' +
       '<option value="custom"' + (appState.aiProvider === 'custom' ? ' selected' : '') + '>Custom</option>' +
-    '</select></div>';
-  var aiKeyPlaceholder = appState.aiApiKeyConfigured
-    ? 'Saved — leave blank to keep, or enter a new key to replace it'
-    : 'Enter AI API Key';
-  html += '<div class="settings-group"><label class="settings-label">AI API Key</label><input type="password" class="settings-input" id="settings-ai-api-key" value="" placeholder="' + escapeHtml(aiKeyPlaceholder) + '" autocomplete="off" /><div id="ai-key-hint" class="text-xs text-muted" style="margin-top:0.4rem;"></div>';
-  if (appState.aiApiKeyConfigured && appState.aiApiKeyPreview) {
-    html += '<div class="text-xs text-emerald" style="margin-top:0.35rem;">' + icon('check-circle') + ' Currently saved: <span class="mono">' + escapeHtml(appState.aiApiKeyPreview) + '</span></div>';
-  }
-  html += '</div>';
-  html += '<div class="settings-group"><label class="settings-label">AI Assistant</label>' +
-    '<select class="settings-input" id="settings-ai-assistant">' +
+    '</select>';
+  var assistantControl = '<select class="settings-input" id="settings-ai-assistant">' +
       '<option value="controller-core"' + (appState.aiAssistant === 'controller-core' ? ' selected' : '') + '>Controller Core</option>' +
       '<option value="risk-analyst"' + (appState.aiAssistant === 'risk-analyst' ? ' selected' : '') + '>Risk Analyst</option>' +
       '<option value="cashflow-guardian"' + (appState.aiAssistant === 'cashflow-guardian' ? ' selected' : '') + '>Cashflow Guardian</option>' +
       '<option value="executive-brief"' + (appState.aiAssistant === 'executive-brief' ? ' selected' : '') + '>Executive Brief</option>' +
-    '</select></div>';
-  html += '<div class="text-sm text-muted">This assistant routes requests through financial skills first, then formats responses in your selected assistant style.</div>';
+    '</select>';
+  var keyControl = '<input type="password" class="settings-input" id="settings-ai-api-key" value="" placeholder="' + escapeHtml(aiKeyPlaceholder) + '" autocomplete="off" />' +
+    '<div id="ai-key-hint" class="text-xs text-muted" style="margin-top:0.4rem;"></div>';
+  if (appState.aiApiKeyConfigured && appState.aiApiKeyPreview) {
+    keyControl += '<div class="text-xs text-emerald" style="margin-top:0.35rem;">' + icon('check-circle') + ' Currently saved: <span class="mono">' + escapeHtml(appState.aiApiKeyPreview) + '</span></div>';
+  }
+  html += '<div class="settings-panel' + (active === 'assistant' ? ' active' : '') + '" data-section="assistant">';
+  html += '<div class="glass-card">' + cardHead('AI Provider & Assistant', 'Your API key, your provider. Requests route through financial skills first.') +
+    '<div class="settings-fields">' +
+      field('AI Provider', providerControl) +
+      field('AI Assistant', assistantControl) +
+      field('AI API Key', keyControl, true) +
+    '</div></div>';
   html += '</div>';
 
-  html += '<div class="glass-card section-gap">';
-  html += '<div class="card-title">Risk Thresholds</div>';
-  html += '<div class="settings-group"><label class="settings-label">Runway Warning (days)</label><input type="number" class="settings-input" id="settings-runway" value="30" min="1" max="365" /></div>';
-  html += '<div class="settings-group"><label class="settings-label">Concentration Threshold (%)</label><input type="number" class="settings-input" id="settings-concentration" value="40" min="1" max="100" /></div>';
+  /* ── Risk & Alerts ── */
+  html += '<div class="settings-panel' + (active === 'alerts' ? ' active' : '') + '" data-section="alerts">';
+  html += '<div class="glass-card">' + cardHead('Risk Thresholds', 'When to raise warnings across the dashboard.') +
+    '<div class="settings-fields">' +
+      field('Runway Warning (days)', '<input type="number" class="settings-input" id="settings-runway" value="30" min="1" max="365" />') +
+      field('Concentration Threshold (%)', '<input type="number" class="settings-input" id="settings-concentration" value="40" min="1" max="100" />') +
+    '</div></div>';
+  html += '<div class="glass-card">' + cardHead('Notifications', 'Where alerts are sent.') +
+    '<div class="settings-fields">' +
+      field('Alert Email', '<input type="email" class="settings-input" id="settings-email" placeholder="alerts@company.com" />', true) +
+    '</div></div>';
   html += '</div>';
 
-  html += '<div class="glass-card section-gap">';
-  html += '<div class="card-title">Notification Settings</div>';
-  html += '<div class="settings-group"><label class="settings-label">Alert Email</label><input type="email" class="settings-input" id="settings-email" placeholder="alerts@company.com" /></div>';
+  /* ── Access ── */
+  html += '<div class="settings-panel' + (active === 'access' ? ' active' : '') + '" data-section="access">';
+  html += '<div class="glass-card">' + cardHead('User Management', 'Roles and access review cadence.') +
+    '<div class="settings-fields">' +
+      field('Primary User Role', '<input type="text" class="settings-input" value="Owner / Admin" readonly />') +
+      field('Access Review', '<input type="text" class="settings-input" value="Review quarterly" readonly />') +
+    '</div></div>';
   html += '</div>';
 
-  html += '<div class="glass-card section-gap">';
-  html += '<div class="card-title">User Management</div>';
-  html += '<div class="settings-group"><label class="settings-label">Primary User Role</label><input type="text" class="settings-input" value="Owner / Admin" readonly /></div>';
-  html += '<div class="settings-group"><label class="settings-label">Access Review</label><input type="text" class="settings-input" value="Review quarterly" readonly /></div>';
-  html += '</div>';
+  /* Save bar (always visible) */
+  html += '<div class="settings-save"><button class="btn-primary" onclick="saveSettings()">' + icon('save') + ' Save changes</button></div>';
 
-  html += '</div>';
-  html += '</div>';
-
-  html += '<div style="display:flex;gap:0.75rem;">';
-  html += '<button class="btn-primary" onclick="saveSettings()">' + icon('save') + ' Save Settings</button>';
-  html += '</div>';
+  html += '</div>'; /* /settings-body */
+  html += '</div>'; /* /settings-layout */
 
   $pageContent.innerHTML = html;
   renderWalletConnectCard('settings-wallet-panel', { compact: true, showDisconnect: true });
   renderZohoPanel('settings-zoho-panel');
+
+  /* Plan & credits: render from cache if present, then refresh from server. */
+  if (appState.entitlement) renderPlanPanel();
+  loadEntitlement().then(renderPlanPanel);
+
+  /* Custom financial rules */
+  loadRules();
 
   var aiProviderSelect = document.getElementById('settings-ai-provider');
   if (aiProviderSelect) {
@@ -2018,11 +3248,20 @@ function renderSettings() {
   }
 }
 
+function switchSettingsSection(sec) {
+  appState.settingsSection = sec;
+  var navBtns = document.querySelectorAll('.settings-nav-item');
+  navBtns.forEach(function(b) { b.classList.toggle('active', b.getAttribute('data-sec') === sec); });
+  var panels = document.querySelectorAll('.settings-panel');
+  panels.forEach(function(p) { p.classList.toggle('active', p.getAttribute('data-section') === sec); });
+}
+
 var AI_KEY_LINKS = {
   openai: { url: 'https://platform.openai.com/api-keys', label: 'platform.openai.com' },
   anthropic: { url: 'https://console.anthropic.com/settings/keys', label: 'console.anthropic.com' },
   google: { url: 'https://aistudio.google.com/apikey', label: 'aistudio.google.com' },
   deepseek: { url: 'https://platform.deepseek.com/api_keys', label: 'platform.deepseek.com' },
+  mistral: { url: 'https://console.mistral.ai/api-keys', label: 'console.mistral.ai' },
   grok: { url: 'https://console.x.ai/team/default/api-keys', label: 'console.x.ai' },
   nvidia: { url: 'https://build.nvidia.com', label: 'build.nvidia.com (free credits, no card)' }
 };
@@ -2297,6 +3536,7 @@ async function saveSettings() {
   checkOnboarding();
   handleOauthResultFromUrl();
   loadNetworks();
+  loadEntitlement();
 
   /* Route on load */
   var initialPage = location.hash.slice(1) || 'overview';

@@ -113,4 +113,18 @@
       orbs.forEach(function (orb) { orb.style.transform = 'translate(0, 0)'; });
     });
   }
+
+  /* ── FAQ accordion ──────────────────────────────────────────────
+     Each .faq-item holds one .faq-q toggle button and a .faq-a
+     answer panel. Only one item is open at a time. */
+  var faqItems = document.querySelectorAll('.faq-item');
+  faqItems.forEach(function (item) {
+    var question = item.querySelector('.faq-q');
+    if (!question) return;
+    question.addEventListener('click', function () {
+      var wasOpen = item.classList.contains('is-open');
+      faqItems.forEach(function (other) { other.classList.remove('is-open'); });
+      if (!wasOpen) item.classList.add('is-open');
+    });
+  });
 })();
