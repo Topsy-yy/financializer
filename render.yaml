@@ -1,0 +1,41 @@
+# Render Blueprint for FinGuard AI.
+# In Render: New → Blueprint → pick this repo. Secrets (sync:false) are entered
+# in the dashboard, never committed. A persistent disk keeps user data across deploys.
+services:
+  - type: web
+    name: finguard-ai
+    runtime: node
+    plan: starter            # 'starter' supports the persistent disk below; 'free' does NOT
+    region: frankfurt        # pick the region closest to your users
+    buildCommand: npm install
+    startCommand: node src/server.js
+    healthCheckPath: /api/health
+    autoDeploy: true
+    disk:
+      name: finguard-data
+      mountPath: /var/data   # user profiles, reports, on-chain ledger, rules
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: REPORTS_DIR
+        value: /var/data
+      - key: MOCK_REQUIRED_INTEGRATIONS
+        value: "false"
+      - key: SESSION_SECRET
+        generateValue: true  # Render generates a strong secret
+      # --- set these in the Render dashboard (kept out of git) ---
+      - key: APP_BASE_URL       # e.g. https://finguard-ai.onrender.com  or  https://yourdomain.xyz
+        sync: false
+      - key: NVIDIA_API_KEY     # free-tier default AI
+        sync: false
+      - key: MISTRAL_APP_KEY    # managed Pro AI (the key you fund)
+        sync: false
+      - key: ZOHO_OAUTH_CLIENT_ID
+        sync: false
+      - key: ZOHO_OAUTH_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false

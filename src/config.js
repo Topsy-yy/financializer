@@ -4,7 +4,12 @@ const dotenv = require("dotenv");
 
 dotenv.config();
 
-const reportsDir = path.resolve(process.cwd(), "data", "reports");
+// Persisted data location. On a host with a mounted disk (e.g. Render), set
+// REPORTS_DIR to the disk's mount path so profiles/reports/ledger/rules survive
+// redeploys. Locally it defaults to ./data/reports.
+const reportsDir = process.env.REPORTS_DIR
+  ? path.resolve(process.env.REPORTS_DIR)
+  : path.resolve(process.cwd(), "data", "reports");
 if (!fs.existsSync(reportsDir)) {
   fs.mkdirSync(reportsDir, { recursive: true });
 }
