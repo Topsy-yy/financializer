@@ -100,8 +100,7 @@ Generate actionable recommendations from:
 
 | Finding Type | Recommendation Template | Priority |
 |---|---|---|
-| `low_runway` (< 30 days) | Accelerate collections, defer spending | Critical |
-| `low_runway` (30-60 days) | Follow up receivables, negotiate payables | High |
+
 | `supplier_dominance` | Source alternative suppliers | High |
 | `customer_concentration` | Diversify customer base | High |
 | `lost_customer` | Customer outreach & retention | Medium |

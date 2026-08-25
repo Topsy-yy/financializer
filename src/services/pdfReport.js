@@ -115,6 +115,26 @@ function renderReportPdf(model) {
       section(doc, "Risk Breakdown", contentW);
       kvTable(doc, model.riskBreakdown.map((r) => [r.label, String(r.value)]), contentW);
 
+      /* LIMITATIONS, BEFORE THE FIGURES THEY QUALIFY.
+         A reader who sees "Cash runway: —" with no explanation will supply
+         their own, and "the business has none" is the obvious guess. This
+         section says what was not measured and why, in the server's own
+         wording, so the dashes further down are read correctly. Rendered only
+         when there is something to disclose. */
+      if (model.disclosure && model.disclosure.limitations
+          && model.disclosure.limitations.length) {
+        section(doc, "Limitations of this report", contentW);
+        bullets(doc, model.disclosure.limitations
+          .map((l) => l.detail
+            || (l.metric ? `${l.metric} is not available (${l.reason || "no reason given"})`
+              : `${l.input} was ${l.basis || "derived"}`))
+          .filter(Boolean),
+        "", contentW);
+        bullets(doc, ["This analysis is not based on fully observed data. "
+          + "Figures shown as \u2014 were not measured, and must not be read as zero."],
+        "", contentW);
+      }
+
       section(doc, "Cash Flow Summary", contentW);
       kvTable(doc, [
         ["Net cash flow", money(model.cashflow.net_cash_flow)],

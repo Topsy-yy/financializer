@@ -39,6 +39,18 @@ var $status         = document.getElementById('status');
 /* ── 2. Application State ────────────────────────────────────── */
 var appState = {
   activeMonth: null,
+  /* Has an analysis actually run for this session? Distinguishes "nothing
+     flagged" from "nothing examined", which must never read the same. */
+  hasAnalysis: false,
+  /* True when the figures on screen come from the demo dataset. */
+  isDemoData: false,
+  /* The authoritative capability map from /api/account/entitlements. The UI
+     renders locks from this; the backend enforces the same rules independently. */
+  account: null,
+  plannedCapabilities: [],
+  /* Periods the tenant ACTUALLY has, from /api/analysis/periods — so the month
+     picker offers real data instead of twelve generated calendar months. */
+  availablePeriods: null,
   cachedData: null,
   userName: 'Aisha',
   businessName: 'ABC Traders Ltd',
@@ -53,6 +65,11 @@ var appState = {
   aiApiKeyPreview: '',
   aiAssistant: 'controller-core',
   chatHistory: [],
+  // Copilot conversation identity, so a follow-up resolves "this"/"that"
+  // server-side against the entities the conversation established.
+  copilotConversationId: null,
+  // A finding the user selected to ask about; applies to ONE question.
+  copilotFindingId: null,
   currentPage: 'overview',
   pageTab: {},
   isLoading: false
@@ -88,7 +105,13 @@ var ICONS = {
   lock:             '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
   link:             '<path d="M10 13a5 5 0 0 0 7.07 0l1.41-1.41a5 5 0 0 0-7.07-7.07L10 6"/><path d="M14 11a5 5 0 0 0-7.07 0L5.5 12.4a5 5 0 0 0 7.07 7.07L14 18"/>',
   flask:            '<path d="M9 2v6.5L4.5 17a2 2 0 0 0 1.8 3h11.4a2 2 0 0 0 1.8-3L15 8.5V2"/><line x1="8" y1="2" x2="16" y2="2"/><line x1="7" y1="14" x2="17" y2="14"/>',
-  send:             '<line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>'
+  send:             '<line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>',
+  sliders:          '<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>',
+  play:             '<polygon points="5 3 19 12 5 21 5 3"/>',
+  'arrow-right':    '<line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>',
+  'trending-down':  '<polyline points="23 18 13.5 8.5 8.5 13.5 1 6"/><polyline points="17 18 23 18 23 12"/>',
+  minus:            '<line x1="5" y1="12" x2="19" y2="12"/>',
+  info:             '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>'
 };
 
 function icon(name, opts) {
@@ -127,7 +150,63 @@ function severityDotClass(severity) {
   return 'dot-info';
 }
 
+/**
+ * THE SCORE BANDS, fetched from the server's rules registry.
+ *
+ * JOB 7 carry-forward: the client used its own 70/40 cut-offs while the registry
+ * defines 80/60/40/20, so a score of 62 the engine calls "Good" was painted
+ * amber and captioned "Needs attention". The bands now come from
+ * GET /api/methodology, which generates them from the registry — one source of
+ * truth, as everywhere else.
+ *
+ * Until that response arrives the client shows a neutral state rather than
+ * guessing: an unknown band is not a reason to invent a colour.
+ */
+var SCORE_BANDS = null;
+
+function loadScoreBands() {
+  /* `api()` was never defined anywhere in this file — this was the only call to
+     it, and it threw a synchronous ReferenceError as the FIRST statement of
+     init(), taking checkOnboarding() and every loader after it down with it.
+     The visible symptom was "Log in is not configured on this server yet" on a
+     server where Google auth was configured and working: appState.authSession
+     was simply never assigned. Every other request here uses fetch directly. */
+  return fetch('/api/methodology')
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+      if (res && res.methodology && res.methodology.scoring) {
+        SCORE_BANDS = res.methodology.scoring.categories || null;
+      }
+    })
+    .catch(function () { /* neutral rendering is the fallback, never a guess */ });
+}
+
+/** The registry's label for a score, or null if the bands are not loaded. */
+function scoreCategory(score) {
+  if (!SCORE_BANDS || score == null || isNaN(score)) return null;
+  for (var i = 0; i < SCORE_BANDS.length; i++) {
+    var band = SCORE_BANDS[i];
+    if (band.atOrAbove == null || score >= band.atOrAbove) return band.label;
+  }
+  return null;
+}
+
+/** Colour from the registry's LABEL, never from a client-side threshold. */
+function categoryClass(label) {
+  if (!label) return 'text-muted';
+  if (/excellent|good/i.test(label)) return 'text-emerald';
+  if (/fair/i.test(label)) return 'text-amber';
+  if (/poor|critical/i.test(label)) return 'text-red';
+  return 'text-muted';
+}
+
 function scoreBarClass(score) {
+  var label = scoreCategory(score);
+  if (label) {
+    if (/excellent|good/i.test(label)) return 'score-high';
+    if (/fair/i.test(label)) return 'score-mid';
+    return 'score-low';
+  }
   if (score >= 70) return 'score-high';
   if (score >= 40) return 'score-mid';
   return 'score-low';
@@ -183,6 +262,108 @@ function notifyAiFailureIfAny(aiAnalysis) {
 }
 
 /* ── Plan & AI credits (entitlements) ────────────────────────── */
+/* ── Plan features (server is authoritative; this only renders state) ──
+   Premium capabilities are shown locked rather than hidden, so users discover
+   them naturally while using the app. */
+function planAllows(feature) {
+  var e = appState.entitlement;
+  if (!e || !e.features) return true; /* until loaded, don't flash a lock */
+  return e.features[feature] !== false;
+}
+function featureCopy(feature, fallback) {
+  var e = appState.entitlement;
+  return (e && e.feature_copy && e.feature_copy[feature]) || fallback || 'This capability';
+}
+/* What a capability contains — defined server-side so the promise shown to the
+   user lives beside the gate that enforces it. */
+function featureDetails(feature) {
+  var e = appState.entitlement;
+  return (e && e.feature_details && e.feature_details[feature]) || [];
+}
+/* The Starter-vs-Growth positioning, also server-supplied. */
+function productBoundary() {
+  var e = appState.entitlement;
+  return (e && e.product_boundary) || {
+    starter: { verb: 'Explains', scope: 'Current state', role: 'Monitoring', question: 'What is happening in my business?' },
+    growth: { verb: 'Recommends', scope: 'Future decisions', role: 'AI CFO', question: 'What should I do next?' }
+  };
+}
+/* Is this capability entitled but not yet built? Server-supplied, so the UI can
+   say "coming soon" instead of implying a missing screen. */
+function featurePlanned(feature) {
+  var e = appState.entitlement;
+  var req = e && e.feature_requirements && e.feature_requirements[feature];
+  return Boolean(req && req.planned);
+}
+/* Which plan unlocks a capability — supplied by the server so the UI never
+   hardcodes a tier name. */
+function featureRequiredPlan(feature) {
+  var e = appState.entitlement;
+  var req = e && e.feature_requirements && e.feature_requirements[feature];
+  return (req && req.plan_label) || 'Growth';
+}
+function upgradeMessage(feature) {
+  var plan = featureRequiredPlan(feature);
+  var tail = plan === 'Accountant Workspace'
+    ? ' is available on the Accountant Workspace plan.'
+    : ' is available on the ' + plan + ' and Custom AI plans.';
+  return featureCopy(feature) + tail;
+}
+function lockIcon() {
+  return icon('lock', { cls: 'lock-ic' });
+}
+/* A locked premium feature presented in place, with what it unlocks. */
+function lockedFeatureCard(feature, title, description, bullets) {
+  if (!bullets || !bullets.length) bullets = featureDetails(feature);
+  var html = '<div class="glass-card locked-feature">' +
+    '<div class="locked-head">' + lockIcon() +
+      '<div><div class="locked-title">' + escapeHtml(title) + '</div>' +
+      '<div class="locked-sub">' + escapeHtml(description) + '</div></div>' +
+      '<span class="locked-badge">' + escapeHtml(featureRequiredPlan(feature)) + '</span>' +
+    '</div>';
+  if (bullets && bullets.length) {
+    html += '<ul class="locked-list">';
+    bullets.forEach(function(b) { html += '<li>' + escapeHtml(b) + '</li>'; });
+    html += '</ul>';
+  }
+  html += '<div class="locked-actions">' +
+      '<button type="button" class="btn-primary btn-small" onclick="showUpgradeModal(\'' +
+        escapeHtml(upgradeMessage(feature)) + '\')">Unlock with ' + escapeHtml(featureRequiredPlan(feature)) + '</button>' +
+      '<button type="button" class="btn-ghost btn-small" onclick="navigate(\'settings\');switchSettingsSection(\'plan\');">Compare plans</button>' +
+    '</div></div>';
+  return html;
+}
+
+/* Sidebar upgrade card — shown only when the current plan is actually missing
+   a capability, so a Growth/Workspace user never sees an upsell. */
+function renderUpgradeCard() {
+  var card = document.getElementById('upgrade-card');
+  if (!card) return;
+  var e = appState.entitlement;
+  if (!e || !e.features) { card.classList.add('hidden'); return; }
+  /* Only advertise capabilities that are BOTH locked and actually built. A
+     Growth user's only locked capabilities are Workspace ones that do not exist
+     yet, so they correctly see no upsell at all. */
+  var locked = Object.keys(e.features).filter(function(k) {
+    return e.features[k] === false && !featurePlanned(k);
+  });
+  if (!locked.length) { card.classList.add('hidden'); return; }
+
+  var target = featureRequiredPlan(locked[0]);
+  var title = document.getElementById('upgrade-card-title');
+  var text = document.getElementById('upgrade-card-text');
+  if (title) title.textContent = 'Upgrade to ' + target;
+  if (text) {
+    /* Describe up to three genuinely locked capabilities — never features the
+       user already has. */
+    var names = locked.slice(0, 3).map(function(k) { return featureCopy(k); });
+    text.textContent = names.length
+      ? 'Unlock ' + names.join(', ') + '.'
+      : 'Unlock more of FinGuard AI.';
+  }
+  card.classList.remove('hidden');
+}
+
 function renderCreditsChip() {
   var chip = document.getElementById('credits-chip');
   if (!chip) return;
@@ -200,18 +381,19 @@ function renderCreditsChip() {
 
 function loadEntitlement() {
   return fetch('/api/entitlement').then(function(r) { return r.json(); }).then(function(d) {
-    if (d && d.ok) { appState.entitlement = d.entitlement; renderCreditsChip(); }
+    if (d && d.ok) { appState.entitlement = d.entitlement; renderCreditsChip(); renderUpgradeCard(); }
     return appState.entitlement;
   }).catch(function() { return null; });
 }
 
 function setPlan(plan) {
   return fetch('/api/plan', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ plan: plan })
+    method: 'POST', headers: mutatingHeaders(), body: JSON.stringify({ plan: plan })
   }).then(function(r) { return r.json(); }).then(function(d) {
     if (d && d.ok) {
       appState.entitlement = d.entitlement;
       renderCreditsChip();
+      renderUpgradeCard();
       showToast('Plan set to ' + d.entitlement.plan_label, 'success');
       if (appState.currentPage === 'settings' && routes.settings) routes.settings.render();
     } else {
@@ -221,7 +403,230 @@ function setPlan(plan) {
   }).catch(function() { showToast('Could not change plan.', 'error'); });
 }
 
+
+/* ═══════════════════════════════════════════════════════════════
+   PLANS & BILLING
+   Every price, plan name and capability shown here comes from the server.
+   This file contains no plan catalog of its own — a second definition is a
+   second source of truth, and billing cannot survive one.
+   ═══════════════════════════════════════════════════════════════ */
+
+var billingState = { plans: null, payment: null, poll: null };
+
+async function loadBilling() {
+  var el = document.getElementById('billing-body');
+  if (!el) return;
+  try {
+    var res = await fetch('/api/billing/plans');
+    var data = await res.json();
+    if (!data.ok) { el.innerHTML = '<p class="text-sm text-muted">Plans unavailable.</p>'; return; }
+    billingState.plans = data;
+    renderBilling();
+  } catch (e) {
+    el.innerHTML = '<p class="text-sm text-muted">Could not load plans.</p>';
+  }
+}
+
+function renderBilling() {
+  var el = document.getElementById('billing-body');
+  if (!el || !billingState.plans) return;
+  var d = billingState.plans;
+  var acct = appState.account || {};
+  var h = '';
+
+  /* CURRENT PLAN, with its real state — not a label guessed from a stored
+     field. `source` distinguishes a paid subscription from the free floor. */
+  if (acct.plan_label) {
+    h += '<div class="plan-current text-sm">Current plan: <strong class="text-brand-bright">'
+      + escapeHtml(acct.plan_label) + '</strong>'
+      + (acct.status && acct.status !== 'none' ? ' · ' + escapeHtml(acct.status) : '')
+      + (acct.expires_at ? ' · renews ' + escapeHtml(String(acct.expires_at).slice(0, 10)) : '')
+      + '</div>';
+  }
+
+  /* PAYMENT UNAVAILABLE IS SAID PLAINLY. The plans are still shown — the user
+     should know what exists — but no checkout is offered that cannot complete,
+     and nothing pretends a payment succeeded. */
+  if (!d.payment.available) {
+    h += '<div class="callout-warning" style="margin:0.75rem 0;">'
+      + '<div class="callout-warning-icon">' + icon('alert-triangle') + '</div>'
+      + '<div class="callout-warning-text">Online payment is not set up on this '
+      + 'server yet, so upgrading is unavailable here.</div></div>';
+  }
+
+  h += '<div class="plan-grid">';
+  (d.plans || []).forEach(function (p) {
+    var isCurrent = acct.plan === p.key;
+    h += '<div class="plan-card' + (isCurrent ? ' plan-card-current' : '') + '">'
+      + '<div class="plan-card-name">' + escapeHtml(p.label) + '</div>'
+      + '<div class="plan-card-price">' + escapeHtml(p.currency) + ' '
+      + Number(p.price).toLocaleString() + '<span class="text-muted text-sm">/'
+      + escapeHtml(String(p.period_days)) + ' days</span></div>'
+      + '<div class="text-sm text-muted">' + Number(p.allowance).toLocaleString()
+      + ' AI credits per month</div>';
+
+    /* WHAT IT ADDS, from the entitlement map the server sent. Nothing is
+       advertised that the catalog does not actually grant. */
+    var adds = (acct.features && billingState.plans.plans)
+      ? Object.keys(acct.features).filter(function (k) { return acct.features[k] === false; })
+      : [];
+    if (!isCurrent && adds.length) {
+      h += '<ul class="plan-card-adds">';
+      adds.slice(0, 5).forEach(function (k) {
+        h += '<li>' + escapeHtml(featureCopy(k))
+          + (featurePlanned(k) ? ' <span class="cap-soon">coming soon</span>' : '') + '</li>';
+      });
+      h += '</ul>';
+    }
+
+    h += isCurrent
+      ? '<div class="text-sm text-emerald">Your current plan</div>'
+      : (d.payment.available
+        ? '<button type="button" class="btn-primary btn-full" onclick="startCheckout(\''
+          + escapeHtml(p.key) + '\')">Upgrade to ' + escapeHtml(p.label) + '</button>'
+        : '<button type="button" class="btn-secondary btn-full" disabled>Unavailable</button>');
+    h += '</div>';
+  });
+  h += '</div>';
+
+  if (acct.source === 'subscription') {
+    h += '<div style="margin-top:1rem;"><button type="button" class="btn-ghost btn-small" '
+      + 'onclick="cancelSubscription()">Cancel subscription</button></div>';
+  }
+
+  h += '<div id="checkout-area"></div>';
+  el.innerHTML = h;
+}
+
+/** Collect the phone number and start an M-Pesa prompt. */
+function startCheckout(planKey) {
+  var area = document.getElementById('checkout-area');
+  if (!area) return;
+  var plan = (billingState.plans.plans || []).filter(function (p) { return p.key === planKey; })[0];
+  if (!plan) return;
+
+  area.innerHTML = '<div class="glass-card section-gap">'
+    + '<div class="card-title">Pay for ' + escapeHtml(plan.label) + '</div>'
+    /* The amount is DISPLAYED from the server's catalog and sent nowhere — the
+       server prices the checkout from the plan key alone. */
+    + '<p class="text-sm text-muted">You will be charged ' + escapeHtml(plan.currency)
+    + ' ' + Number(plan.price).toLocaleString() + ' for ' + escapeHtml(String(plan.period_days))
+    + ' days.</p>'
+    + '<label class="settings-label">M-Pesa phone number</label>'
+    + '<input type="tel" class="settings-input" id="checkout-phone" placeholder="07XX XXX XXX" />'
+    + '<div style="margin-top:0.75rem;">'
+    + '<button type="button" class="btn-primary" onclick="submitCheckout(\''
+    + escapeHtml(planKey) + '\')">Send payment request</button> '
+    + '<button type="button" class="btn-ghost" onclick="document.getElementById(\'checkout-area\').innerHTML=\'\'">Cancel</button>'
+    + '</div><div id="checkout-status" class="text-sm" style="margin-top:0.75rem;"></div></div>';
+}
+
+async function submitCheckout(planKey) {
+  var phoneEl = document.getElementById('checkout-phone');
+  var statusEl = document.getElementById('checkout-status');
+  var phone = phoneEl ? phoneEl.value.trim() : '';
+  if (!phone) { statusEl.innerHTML = '<span class="text-red">Enter your phone number.</span>'; return; }
+
+  statusEl.innerHTML = 'Sending payment request…';
+  try {
+    /* ONLY the plan key and the phone number. No amount, no price, no period —
+       the server reads those from its own catalog. */
+    var res = await fetch('/api/billing/checkout', {
+      method: 'POST', headers: mutatingHeaders(),
+      body: JSON.stringify({ plan: planKey, phone: phone })
+    });
+    var data = await res.json();
+
+    if (!data.ok) {
+      statusEl.innerHTML = '<span class="text-red">' +
+        escapeHtml(data.detail || 'The payment could not be started.') + '</span>';
+      return;
+    }
+
+    billingState.payment = data.payment_id;
+    statusEl.innerHTML = icon('clock') + ' ' + escapeHtml(data.detail
+      || 'Check your phone and approve the payment.');
+    pollCheckout(data.payment_id);
+  } catch (e) {
+    statusEl.innerHTML = '<span class="text-red">Connection error.</span>';
+  }
+}
+
+/**
+ * Poll until the SERVER says the payment settled.
+ *
+ * The client never decides that a payment succeeded — it asks, and the answer
+ * comes from a subscription the backend activated after verifying the callback.
+ */
+function pollCheckout(paymentId) {
+  var statusEl = document.getElementById('checkout-status');
+  var tries = 0;
+  clearInterval(billingState.poll);
+  billingState.poll = setInterval(async function () {
+    tries += 1;
+    if (tries > 60) {   // ~3 minutes, past the checkout window
+      clearInterval(billingState.poll);
+      if (statusEl) statusEl.innerHTML = '<span class="text-amber">No confirmation yet. '
+        + 'If you approved the payment it may still arrive — check Plan &amp; Credits shortly.</span>';
+      return;
+    }
+    try {
+      var res = await fetch('/api/billing/checkout/' + encodeURIComponent(paymentId));
+      var d = await res.json();
+      if (!d.ok) return;
+
+      if (d.status === 'successful') {
+        clearInterval(billingState.poll);
+        if (d.account) appState.account = d.account;
+        appState.entitlement = null;
+        if (statusEl) statusEl.innerHTML = '<span class="text-emerald">' + icon('check-circle')
+          + ' Payment confirmed — your plan is active.</span>';
+        showToast('Upgraded to ' + (d.account ? d.account.plan_label : d.plan), 'success');
+        // Re-render with the NEW capabilities, no manual refresh.
+        await refreshAccount();
+        renderBilling();
+        renderCreditsChip();
+        renderUpgradeCard();
+      } else if (d.status === 'failed' || d.status === 'expired' || d.status === 'cancelled') {
+        clearInterval(billingState.poll);
+        if (statusEl) statusEl.innerHTML = '<span class="text-red">Payment '
+          + escapeHtml(d.status) + (d.failure_reason ? ': ' + escapeHtml(d.failure_reason) : '')
+          + '. Your plan has not changed — you can try again.</span>';
+      }
+    } catch (e) { /* keep polling */ }
+  }, 3000);
+}
+
+async function cancelSubscription() {
+  if (!confirm('Cancel your subscription and return to the free Starter plan?')) return;
+  try {
+    var res = await fetch('/api/billing/cancel', { method: 'POST', headers: mutatingHeaders() });
+    var d = await res.json();
+    if (d.ok) {
+      appState.account = d.account;
+      showToast('Subscription cancelled. You are on ' + d.account.plan_label + '.', 'info');
+      renderBilling();
+      renderCreditsChip();
+    }
+  } catch (e) { showToast('Could not cancel.', 'error'); }
+}
+
+/** The authoritative capability map. The UI renders locks from THIS. */
+async function refreshAccount() {
+  try {
+    var res = await fetch('/api/account/entitlements');
+    var d = await res.json();
+    if (d.ok) {
+      appState.account = d.account;
+      appState.plannedCapabilities = d.planned || [];
+    }
+    return d.ok ? d.account : null;
+  } catch (e) { return null; }
+}
+
 function renderPlanPanel() {
+  // Populate the upgrade cards alongside the credits panel.
+  loadBilling();
   var el = document.getElementById('plan-panel-body');
   if (!el) return;
   var e = appState.entitlement;
@@ -235,12 +640,58 @@ function renderPlanPanel() {
     h += '<div class="progress-bar" style="margin:0.6rem 0;"><div class="progress-fill" style="width:' + pct + '%"></div></div>';
     h += '<div class="text-sm text-muted"><strong class="text-main">' + e.credits + '</strong> of ' + e.allowance + ' AI credits left this month.</div>';
   }
-  h += '<div class="text-xs text-muted" style="margin-top:0.75rem;">Credit costs — AI chat: 2 · monthly review: 15 · executive report: 20 · forecast: 25. Your computed dashboard is always free.</div>';
+  h += '<div class="text-xs text-muted" style="margin-top:0.75rem;">Credit costs — AI chat: 2 · action plan: 10 · monthly review: 15 · forecast advisor: 25 · what-if: 25. Your computed dashboard, reports and PDF exports are always free.</div>';
+
+  /* What this plan includes, and what the next tier would add. Built entirely
+     from server-supplied capabilities — no plan names or feature lists here. */
+  var GROWTH_HIGHLIGHTS = [
+    'ai_forecast_advisory', 'what_if_simulator', 'ai_action_plan', 'smart_recommendations',
+    'automatic_monitoring', 'ai_followup_workflow', 'team_collaboration', 'custom_rules',
+    'ai_executive_reports', 'email_alerts', 'tax_readiness', 'benchmarking'
+  ];
+  var included = GROWTH_HIGHLIGHTS.filter(function(k) { return e.features && e.features[k]; });
+  var missing = GROWTH_HIGHLIGHTS.filter(function(k) { return e.features && e.features[k] === false; });
+
+  function capRow(k, on) {
+    var soon = featurePlanned(k)
+      ? ' <span class="cap-soon">coming soon</span>'
+      : '';
+    return '<li class="cap-row' + (on ? '' : ' cap-off') + '">' +
+      (on ? '<span class="text-emerald">' + icon('check-circle') + '</span>' : lockIcon()) +
+      '<span>' + escapeHtml(featureCopy(k)) + soon + '</span></li>';
+  }
+
+  if (missing.length) {
+    /* Starter: make the reason to upgrade concrete. */
+    var pb = productBoundary();
+    h += '<div class="settings-card-head" style="margin-top:1.5rem;margin-bottom:0.5rem;"><h3>What ' +
+      escapeHtml(featureRequiredPlan(missing[0])) + ' adds</h3>' +
+      '<p>Starter answers <em>' + escapeHtml(pb.starter.question) + '</em>. ' +
+      escapeHtml(featureRequiredPlan(missing[0])) + ' answers <em>' + escapeHtml(pb.growth.question) + '</em>.</p></div>';
+    h += '<div class="boundary-grid">' +
+      '<div class="boundary-col"><div class="boundary-head">Starter · ' + escapeHtml(pb.starter.role) + '</div>' +
+        '<div class="boundary-verb">' + escapeHtml(pb.starter.verb) + '</div>' +
+        '<div class="boundary-eg">“' + escapeHtml(pb.starter.example) + '”</div></div>' +
+      '<div class="boundary-col boundary-col-paid"><div class="boundary-head">' + escapeHtml(featureRequiredPlan(missing[0])) + ' · ' + escapeHtml(pb.growth.role) + '</div>' +
+        '<div class="boundary-verb">' + escapeHtml(pb.growth.verb) + '</div>' +
+        '<div class="boundary-eg">“' + escapeHtml(pb.growth.example) + '”</div></div>' +
+    '</div>';
+    h += '<ul class="cap-list">';
+    missing.forEach(function(k) { h += capRow(k, false); });
+    h += '</ul>';
+  } else if (included.length) {
+    /* Growth and above: confirm what they already have, flag what is still building. */
+    h += '<div class="settings-card-head" style="margin-top:1.5rem;margin-bottom:0.5rem;"><h3>Included in your plan</h3></div>';
+    h += '<ul class="cap-list">';
+    included.forEach(function(k) { h += capRow(k, true); });
+    h += '</ul>';
+  }
 
   h += '<div class="settings-card-head" style="margin-top:1.5rem;margin-bottom:0.6rem;"><h3>Change plan</h3><p>Payments aren’t wired up yet — use these to simulate upgrading while testing.</p></div>';
   h += '<div style="display:flex;gap:0.5rem;flex-wrap:wrap;">';
-  h += '<button type="button" class="btn-secondary btn-small" onclick="setPlan(\'free\')">Starter (Free)</button>';
-  h += '<button type="button" class="btn-primary btn-small" onclick="setPlan(\'pro\')">Professional</button>';
+  h += '<button type="button" class="btn-secondary btn-small" onclick="setPlan(\'starter\')">Starter (Free)</button>';
+  h += '<button type="button" class="btn-primary btn-small" onclick="setPlan(\'growth\')">Growth</button>';
+  h += '<button type="button" class="btn-secondary btn-small" onclick="setPlan(\'workspace\')">Accountant Workspace</button>';
   h += '</div>';
   el.innerHTML = h;
 }
@@ -255,8 +706,56 @@ function showStatus(text) {
   $status.textContent = text;
 }
 
+/**
+ * UNMEASURED SENTINEL.
+ *
+ * The API deliberately returns null for a value it could not measure, which is
+ * a different claim from zero. Rendering that as "KES 0" tells the user the
+ * business broke even when in fact nothing was measured — so every unmeasured
+ * value renders as this, and never as a number.
+ */
+var UNMEASURED = '\u2014'; // em dash
+
+/** Is this a real, measured number? Guards BOTH the value and its colour. */
+function isMeasured(value) {
+  return value != null && value !== '' && !isNaN(Number(value));
+}
+
+/**
+ * Read the CSRF token the server issued.
+ *
+ * Double-submit: the server sets `fg_csrf` on any safe request, and every
+ * mutating request must echo it in a header. Another origin cannot read the
+ * cookie, so it cannot produce the header — which is the whole protection.
+ */
+function csrfToken() {
+  var match = String(document.cookie || "").match(/(?:^|;\s*)fg_csrf=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
+/** Headers for a JSON request that changes state. */
+function mutatingHeaders(extra) {
+  var headers = Object.assign({ "Content-Type": "application/json" }, extra || {});
+  headers["x-csrf-token"] = csrfToken();
+  return headers;
+}
+
+/**
+ * CSRF header ONLY, with no Content-Type.
+ *
+ * For multipart uploads and bodiless requests. A FormData upload must NOT have
+ * Content-Type set by hand -- the browser has to add it together with the
+ * multipart boundary, and overriding it makes the body unparseable server-side.
+ */
+function csrfHeaders(extra) {
+  var headers = Object.assign({}, extra || {});
+  headers["x-csrf-token"] = csrfToken();
+  return headers;
+}
+
 function formatCurrency(amount) {
-  if (amount == null || isNaN(amount)) return 'KES 0';
+  // JOB 7: was 'KES 0'. Null means "we could not measure this".
+  if (amount == null || isNaN(amount)) return UNMEASURED;
   var num = Number(amount);
   var neg = num < 0;
   num = Math.abs(num);
@@ -266,8 +765,46 @@ function formatCurrency(amount) {
 }
 
 function formatPercent(value) {
-  if (value == null || isNaN(value)) return '0%';
+  // JOB 7: was '0%'. A growth rate with no prior period is unknown, not flat.
+  if (value == null || isNaN(value)) return UNMEASURED;
   return Number(value).toFixed(1) + '%';
+}
+
+
+/** Thousands-separated integer, or the unmeasured sentinel. */
+function formatNumber(n) {
+  if (n == null || isNaN(n)) return UNMEASURED;
+  return Number(n).toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+/**
+ * Explain WHY a figure could not be produced.
+ *
+ * The API states a reason on every unavailable metric. Showing it turns a bare
+ * dash into something actionable — and for mixed currency it shows the
+ * per-currency parts, which ARE known even though their sum is not.
+ */
+function unavailableNotice(block, what) {
+  if (!block || block.available !== false) return '';
+  var reason = block.unavailable_reason;
+  var text;
+  if (reason === 'mixed_currency') {
+    var parts = (block.by_currency || [])
+      .map(function(b) { return (b.currency || 'unspecified') + ' ' + formatNumber(b.total); })
+      .join(', ');
+    text = what + ' cannot be combined: this period holds more than one currency and no '
+      + 'conversion rate is available. Measured separately: ' + (parts || 'n/a') + '.';
+  } else if (reason === 'unattributed_transactions') {
+    text = what + ' could not be measured: ' + formatCurrency(block.unattributed_amount)
+      + ' of activity names no counterparty.';
+  } else if (reason === 'no_attributable_value') {
+    text = what + ' could not be measured: there is no attributable value this period.';
+  } else if (reason === 'no_transactions') {
+    text = what + ' could not be measured: there are no transactions for this period.';
+  } else {
+    text = what + ' could not be measured for this period.';
+  }
+  return '<div class="callout-info">' + escapeHtml(text) + '</div>';
 }
 
 function maskWalletAddress(address) {
@@ -316,6 +853,65 @@ function renderEmptyState(iconName, title, text) {
   '</div>';
 }
 
+/**
+ * DISCLOSURE — what the reader must be told about this analysis.
+ *
+ * The API returns a `disclosure` block on every route whose figures may be
+ * incomplete: a derived input, an unavailable metric, partial scoring coverage.
+ * app.js IGNORED IT ENTIRELY, so a page built on an estimated cash balance
+ * looked exactly like one built on fully observed books — and a metric the
+ * engine had a precise reason for withholding rendered as a blank the reader
+ * would naturally read as zero.
+ *
+ * ONE helper, used by every page that receives a disclosure, rather than
+ * per-page DOM logic that would drift. The WORDING comes from the backend:
+ * `detail` is written where the reason is actually known, so repeating it here
+ * would let the two versions disagree.
+ */
+function renderDisclosure(disclosure) {
+  if (!disclosure || !disclosure.limitations || !disclosure.limitations.length) return '';
+
+  /* DEMO DATA GETS ITS OWN BANNER, not a bullet in a list of caveats.
+     "Some inputs were estimated" and "none of this is your business" are not
+     the same order of statement, and the second must not be skimmable. */
+  var demo = disclosure.limitations.filter(function (l) { return l.type === 'demo_data'; })[0];
+  var demoHtml = demo
+    ? '<div class="callout-warning disclosure-demo">'
+      + '<div class="callout-warning-icon">' + icon('alert-triangle') + '</div>'
+      + '<div class="callout-warning-text"><strong>Sample data — not your accounts.</strong> '
+      + escapeHtml(demo.detail) + '</div></div>'
+    : '';
+  var rest = disclosure.limitations.filter(function (l) { return l.type !== 'demo_data'; });
+  if (!rest.length) return demoHtml;
+  disclosure = { scoring_coverage_pct: disclosure.scoring_coverage_pct, limitations: rest };
+
+  var items = disclosure.limitations.map(function (l) {
+    // Prefer the backend's own explanation; fall back to naming the field only
+    // when it did not supply one, so nothing is ever shown without a reason.
+    var text = l.detail
+      || (l.metric ? (l.metric + ' is not available (' + (l.reason || 'unknown reason') + ')')
+                   : (l.input ? (l.input + ' was ' + (l.basis || 'derived')) : ''));
+    if (!text) return '';
+    return '<li>' + escapeHtml(text) + '</li>';
+  }).filter(Boolean).join('');
+
+  if (!items) return '';
+
+  var coverage = (disclosure.scoring_coverage_pct != null)
+    ? ' Scored on ' + escapeHtml(String(disclosure.scoring_coverage_pct)) + '% of the model.'
+    : '';
+
+  return demoHtml
+    + '<div class="callout-warning disclosure-notice">'
+    + '<div class="callout-warning-icon">' + icon('alert-triangle') + '</div>'
+    + '<div class="callout-warning-text">'
+    + '<strong>This analysis is not based on fully observed data.</strong>' + coverage
+    + '<ul class="disclosure-list">' + items + '</ul>'
+    + '<span class="text-sm text-muted">Values shown as not measured were not '
+    + 'observed, and must not be read as zero.</span>'
+    + '</div></div>';
+}
+
 function renderAiInsightsCard(aiInsights) {
   if (!aiInsights) {
     return '<div class="glass-card ai-insights-card section-gap">' +
@@ -351,6 +947,207 @@ function renderAiInsightsCard(aiInsights) {
 
   html += '</div>';
   return html;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   FINDING INVESTIGATION
+
+   The endpoints have existed since JOB 12 and had no frontend at all:
+   /api/findings/:key/records, /api/records/:id, and the comment / resolve /
+   thread trio. A user could be told a duplicate payment existed and had no way
+   to see which transactions it referred to, or to record what they did about it.
+   ═══════════════════════════════════════════════════════════════ */
+
+var investigation = { key: null, records: null, thread: null };
+
+/* CLICKS ARE DELEGATED, NOT INLINE.
+   The app's own Helmet policy sends `script-src-attr 'none'`, which makes an
+   `onclick="..."` attribute inert — the browser never compiles it and the
+   button silently does nothing. That is invisible to a backend test, so this
+   panel is wired through one delegated listener on data attributes instead. */
+document.addEventListener('click', function (e) {
+  var el = e.target.closest && e.target.closest('[data-fg-action]');
+  if (!el) return;
+  var action = el.getAttribute('data-fg-action');
+  if (action === 'investigate') investigateFinding(el.getAttribute('data-finding'));
+  else if (action === 'investigation-close') closeInvestigation();
+  else if (action === 'finding-note') submitFindingNote();
+  else if (action === 'finding-resolve') {
+    toggleFindingResolved(el.getAttribute('data-resolved') === 'true');
+  }
+  else if (action === 'analyse-anyway') {
+    // The user has read which documents were not imported and chosen to go on.
+    var period = el.getAttribute('data-period');
+    appState.activeMonth = period;
+    runMonthlyReview(period).then(function () {
+      if (typeof loadImportHistory === 'function') loadImportHistory();
+      navigate('overview');
+    });
+  }
+});
+
+async function investigateFinding(findingKey) {
+  investigation.key = findingKey;
+  openInvestigationPanel('<p class="text-sm text-muted">Loading evidence…</p>');
+
+  var results = await Promise.all([
+    fetch('/api/findings/' + encodeURIComponent(findingKey) + '/records')
+      .then(function (r) { return r.json(); }).catch(function () { return null; }),
+    fetch('/api/findings/thread?fingerprint=' + encodeURIComponent(findingKey))
+      .then(function (r) { return r.json(); }).catch(function () { return null; })
+  ]);
+  investigation.records = results[0];
+  investigation.thread = results[1];
+  renderInvestigation();
+}
+
+function openInvestigationPanel(inner) {
+  closeInvestigation();
+  var wrap = document.createElement('div');
+  wrap.id = 'investigation-modal';
+  wrap.className = 'modal-overlay';
+  wrap.innerHTML = '<div class="modal-card glass-card investigation-card">'
+    + '<div class="investigation-head"><h2>Investigate finding</h2>'
+    + '<button type="button" class="btn-ghost btn-small" data-fg-action="investigation-close">Close</button></div>'
+    + '<div id="investigation-body">' + inner + '</div></div>';
+  document.body.appendChild(wrap);
+}
+
+function closeInvestigation() {
+  var el = document.getElementById('investigation-modal');
+  if (el) el.remove();
+}
+
+function renderInvestigation() {
+  var body = document.getElementById('investigation-body');
+  if (!body) return;
+  var r = investigation.records;
+  var h = '';
+
+  if (!r || !r.ok) {
+    h += '<div class="callout-warning"><div class="callout-warning-icon">' + icon('alert-triangle')
+      + '</div><div class="callout-warning-text">'
+      + escapeHtml((r && r.detail) || 'The evidence for this finding could not be loaded.')
+      + '</div></div>';
+  } else {
+    h += '<div class="text-sm text-muted">' + escapeHtml(r.rule_id || '')
+      + (r.severity ? ' · ' + escapeHtml(r.severity) : '') + '</div>';
+
+    /* THE DISTINCTION THAT MATTERS. `records: []` with `unresolved: [...]`
+       means the evidence exists and we could not retrieve it — which is NOT
+       the same as a finding with no evidence. Rendering an empty list without
+       saying so would tell the user the finding rests on nothing. */
+    if (r.unresolved && r.unresolved.length) {
+      h += '<div class="callout-warning" style="margin-top:0.75rem;">'
+        + '<div class="callout-warning-icon">' + icon('alert-triangle') + '</div>'
+        + '<div class="callout-warning-text"><strong>'
+        + escapeHtml(String(r.unresolved.length))
+        + ' cited record(s) could not be retrieved.</strong> '
+        + 'They are referenced by this finding but are not currently available, '
+        + 'so the evidence below is incomplete.'
+        + '<div class="text-xs text-muted" style="margin-top:0.35rem;">'
+        + escapeHtml(r.unresolved.join(', ')) + '</div></div></div>';
+    }
+
+    if (r.records && r.records.length) {
+      h += '<div class="card-title" style="margin-top:1rem;">Underlying transactions</div>';
+      h += '<table class="data-table"><thead><tr><th>Date</th><th>Description</th>'
+        + '<th>Counterparty</th><th>Amount</th><th>Source</th></tr></thead><tbody>';
+      r.records.forEach(function (t) {
+        h += '<tr>'
+          + '<td>' + escapeHtml(t.date || '—') + '</td>'
+          + '<td>' + escapeHtml(t.description || '—') + '</td>'
+          /* An unattributed record stays unattributed — never "Unknown". */
+          + '<td>' + (t.counterparty ? escapeHtml(t.counterparty)
+            : '<span class="text-muted">not attributed</span>') + '</td>'
+          + '<td>' + formatCurrency(t.amount) + '</td>'
+          /* PROVENANCE: where this row came from, and its id in that system. */
+          + '<td class="text-xs text-muted">' + escapeHtml(t.sourceSystem || '—')
+          + '<br>' + escapeHtml(t.sourceRecordId || '') + '</td>'
+          + '</tr>';
+      });
+      h += '</tbody></table>';
+    } else if (!r.unresolved || !r.unresolved.length) {
+      h += '<p class="text-sm text-muted" style="margin-top:1rem;">'
+        + 'This finding cites no individual transactions — it was derived from '
+        + 'period totals rather than specific records.</p>';
+    }
+  }
+
+  // ── Notes and resolution ─────────────────────────────────────
+  var t = investigation.thread;
+  var thread = (t && t.thread) || null;
+  h += '<div class="card-title" style="margin-top:1.5rem;">Notes</div>';
+
+  if (t && !t.ok) {
+    h += '<p class="text-sm text-muted">' + escapeHtml(t.error === 'not_a_member'
+      ? 'You do not have access to notes on this workspace.'
+      : 'Notes are unavailable.') + '</p>';
+  } else {
+    if (thread && thread.resolved) {
+      h += '<div class="callout-info text-sm">' + icon('check-circle') + ' Resolved'
+        /* The server's thread view is snake_case (`resolved_by`,
+           `resolved_at`); reading the camelCase names silently rendered a
+           bare "Resolved" with no attribution. */
+        + (thread.resolved_by ? ' by ' + escapeHtml(thread.resolved_by) : '')
+        + (thread.resolved_at ? ' on ' + escapeHtml(String(thread.resolved_at).slice(0, 10)) : '')
+        + '</div>';
+    }
+    var comments = (thread && thread.comments) || [];
+    if (comments.length) {
+      comments.forEach(function (c) {
+        h += '<div class="finding-comment"><div class="text-xs text-muted">'
+          + escapeHtml(c.name || 'Someone') + ' · ' + escapeHtml(String(c.ts || '').slice(0, 16))
+          + '</div><div>' + escapeHtml(c.text) + '</div></div>';
+      });
+    } else {
+      h += '<p class="text-sm text-muted">No notes yet.</p>';
+    }
+
+    h += '<textarea class="settings-input" id="investigation-note" rows="2" '
+      + 'placeholder="What did you find?"></textarea>'
+      + '<div style="margin-top:0.6rem;display:flex;gap:0.5rem;">'
+      + '<button type="button" class="btn-primary btn-small" data-fg-action="finding-note">Add note</button>'
+      + '<button type="button" class="btn-secondary btn-small" data-fg-action="finding-resolve"'
+      + ' data-resolved="' + (thread && thread.resolved ? 'false' : 'true') + '">'
+      + (thread && thread.resolved ? 'Reopen' : 'Mark resolved') + '</button>'
+      + '</div>';
+  }
+
+  body.innerHTML = h;
+}
+
+async function submitFindingNote() {
+  var el = document.getElementById('investigation-note');
+  var text = el ? el.value.trim() : '';
+  if (!text) { showToast('Write a note first.', 'warning'); return; }
+  try {
+    var res = await fetch('/api/findings/comment', {
+      method: 'POST', headers: mutatingHeaders(),
+      body: JSON.stringify({ fingerprint: investigation.key, text: text })
+    });
+    var d = await res.json();
+    if (!d.ok) { showToast(d.error === 'forbidden' ? 'Your role cannot comment.' : 'Could not save the note.', 'error'); return; }
+    // Refresh from the SERVER's thread, not from what we just typed.
+    investigation.thread = d;
+    renderInvestigation();
+    showToast('Note added.', 'success');
+  } catch (e) { showToast('Connection error.', 'error'); }
+}
+
+async function toggleFindingResolved(resolved) {
+  try {
+    var res = await fetch('/api/findings/resolve', {
+      method: 'POST', headers: mutatingHeaders(),
+      body: JSON.stringify({ fingerprint: investigation.key, resolved: resolved })
+    });
+    var d = await res.json();
+    if (!d.ok) { showToast(d.error === 'forbidden' ? 'Your role cannot resolve findings.' : 'Could not update.', 'error'); return; }
+    investigation.thread = d;
+    renderInvestigation();
+    showToast(resolved ? 'Finding marked resolved.' : 'Finding reopened.', 'success');
+  } catch (e) { showToast('Connection error.', 'error'); }
 }
 
 function renderFindingsList(findings) {
@@ -600,8 +1397,9 @@ async function handleSwitchNetwork(networkKey) {
 }
 
 /* ── Upload Panel (shared: onboarding, Settings/Financial Health) ─
-   Alternative to Zoho: parse a bank/accounting CSV export into the
-   same shape the risk engine already consumes. ─────────────────── */
+   Alternative to Zoho. Accepts either a bank/accounting CSV export, or the
+   source documents themselves — invoices, bills, receipts and bank slips as
+   PDFs — because that is what an SME actually keeps. ───────────── */
 function renderUploadPanel(containerId, opts) {
   opts = opts || {};
   var el = document.getElementById(containerId);
@@ -615,9 +1413,22 @@ function renderUploadPanel(containerId, opts) {
   var html = '';
   html += '<div class="form-group"><label class="settings-label">Which month is this for?</label>';
   html += '<select class="settings-input" id="' + containerId + '-period">' + monthOptions + '</select></div>';
-  html += '<div class="form-group"><label class="settings-label">Bank / Accounting CSV Export</label>';
-  html += '<div class="upload-dropzone"><input type="file" accept=".csv,text/csv" id="' + containerId + '-file" /></div>';
-  html += '<p class="text-xs text-muted">Needs a date column and either an amount column, or separate debit/credit columns.</p></div>';
+
+  html += '<div class="form-group"><label class="settings-label">Your records</label>';
+  /* MULTIPLE, and both formats. A day of paperwork is many files, so the input
+     takes a whole selection at once. */
+  html += '<div class="upload-dropzone"><input type="file" multiple '
+    + 'accept=".csv,.pdf,text/csv,application/pdf" id="' + containerId + '-file" /></div>';
+  html += '<p class="text-xs text-muted">'
+    + 'A bank or accounting <strong>CSV export</strong> — or your <strong>PDF documents</strong> '
+    + '(invoices, bills, receipts, bank slips). You can select a whole day or month at once.'
+    + '</p>';
+  html += '<p class="text-xs text-muted" style="margin-top:0.3rem;">'
+    + 'Scanned or photographed PDFs cannot be read — the figures are an image, not text. '
+    + 'Those documents are listed after upload so you can enter them another way.</p>';
+  html += '<div id="' + containerId + '-selected" class="text-xs text-muted" style="margin-top:0.4rem;"></div>';
+  html += '</div>';
+
   html += '<div class="form-group"><label class="settings-label">Current Cash Balance (optional)</label>';
   html += '<input type="number" class="settings-input" id="' + containerId + '-balance" placeholder="Leave blank to estimate from transactions" /></div>';
   html += '<button type="button" class="btn-primary btn-full" id="' + containerId + '-submit">' + icon('download') + ' Upload &amp; Analyze</button>';
@@ -629,6 +1440,62 @@ function renderUploadPanel(containerId, opts) {
   if (submitBtn) {
     submitBtn.addEventListener('click', function() { handleUploadSubmit(containerId, opts); });
   }
+
+  /* Confirm what was picked BEFORE uploading. Selecting a folder of 53 files
+     and being shown nothing is how people upload the wrong month. */
+  var fileEl = document.getElementById(containerId + '-file');
+  var selectedEl = document.getElementById(containerId + '-selected');
+  if (fileEl && selectedEl) {
+    fileEl.addEventListener('change', function () {
+      var files = Array.prototype.slice.call(fileEl.files || []);
+      if (!files.length) { selectedEl.innerHTML = ''; return; }
+      var pdfs = files.filter(function (f) { return /\.pdf$/i.test(f.name); }).length;
+      var csvs = files.length - pdfs;
+      var parts = [];
+      if (pdfs) parts.push(pdfs + ' PDF document' + (pdfs === 1 ? '' : 's'));
+      if (csvs) parts.push(csvs + ' CSV file' + (csvs === 1 ? '' : 's'));
+      selectedEl.innerHTML = 'Selected: ' + escapeHtml(parts.join(' and '))
+        + (files.length === 1 ? ' — ' + escapeHtml(files[0].name) : '');
+    });
+  }
+}
+
+/**
+ * Documents the server could not import.
+ *
+ * ALWAYS RENDERED WHEN NON-EMPTY. The server names every file it refused and
+ * why; dropping that on the floor would show a clean summary for a month that
+ * is silently missing records — the same class of error as presenting an
+ * unmeasured figure as zero. Each row is a file the user still has to account
+ * for.
+ */
+function renderUnreadDocuments(rejected, outOfPeriod) {
+  var rows = [];
+  (rejected || []).forEach(function (r) {
+    rows.push({ name: r.filename, reason: r.reason });
+  });
+  (outOfPeriod || []).forEach(function (r) {
+    rows.push({ name: r.filename, reason: r.reason });
+  });
+  if (!rows.length) return '';
+
+  var h = '<div class="callout-warning" style="margin-top:0.75rem;">'
+    + '<div class="callout-warning-icon">' + icon('alert-triangle') + '</div>'
+    + '<div class="callout-warning-text"><strong>'
+    + escapeHtml(String(rows.length)) + ' document'
+    + (rows.length === 1 ? ' was' : 's were') + ' not imported.</strong> '
+    + (rows.length === 1 ? 'It is' : 'They are') + ' not included in the figures above.';
+  h += '<div style="margin-top:0.5rem;">';
+  rows.slice(0, 25).forEach(function (r) {
+    h += '<div class="text-xs" style="margin-bottom:0.2rem;">'
+      + '<span class="text-muted">' + escapeHtml(r.name || 'document') + '</span> — '
+      + escapeHtml(r.reason || 'could not be read') + '</div>';
+  });
+  if (rows.length > 25) {
+    h += '<div class="text-xs text-muted">and ' + escapeHtml(String(rows.length - 25)) + ' more.</div>';
+  }
+  h += '</div></div></div>';
+  return h;
 }
 
 async function handleUploadSubmit(containerId, opts) {
@@ -638,38 +1505,99 @@ async function handleUploadSubmit(containerId, opts) {
   var balanceEl = document.getElementById(containerId + '-balance');
   var resultEl = document.getElementById(containerId + '-result');
 
-  if (!fileEl.files || !fileEl.files[0]) {
-    showToast('Choose a CSV file first.', 'warning');
+  var files = Array.prototype.slice.call((fileEl && fileEl.files) || []);
+  if (!files.length) {
+    showToast('Choose a CSV file or your PDF documents first.', 'warning');
+    return;
+  }
+
+  /* MIXING THE TWO IS REFUSED HERE TOO, so the user is told before a 400 comes
+     back. A CSV export and the documents behind it describe the same money;
+     importing both would count it twice. */
+  var pdfs = files.filter(function (f) { return /\.pdf$/i.test(f.name); });
+  if (pdfs.length && pdfs.length !== files.length) {
+    showToast('Upload either a CSV export or your PDF documents — not both at '
+      + 'once, or the same transaction could be counted twice.', 'warning');
+    return;
+  }
+  if (!pdfs.length && files.length > 1) {
+    showToast('Attach one CSV file, or attach your PDF documents.', 'warning');
     return;
   }
 
   var formData = new FormData();
-  formData.append('file', fileEl.files[0]);
+  files.forEach(function (f) { formData.append('file', f); });
   formData.append('period', periodEl.value);
   if (balanceEl.value) formData.append('currentCashBalance', balanceEl.value);
 
   resultEl.innerHTML = '<div class="loading-shimmer" style="height:60px;margin-top:0.75rem;"></div>';
 
   try {
-    var res = await fetch('/api/financial-data/upload', { method: 'POST', body: formData });
+    var res = await fetch('/api/financial-data/upload', {
+      method: 'POST',
+      // csrfHeaders, NOT mutatingHeaders: setting Content-Type by hand would
+      // strip the multipart boundary the browser generates for FormData.
+      headers: csrfHeaders(),
+      body: formData
+    });
     var data = await res.json();
 
     if (!data.ok) {
-      resultEl.innerHTML = '<p class="text-red text-sm" style="margin-top:0.75rem;">' + escapeHtml(data.error || 'Upload failed.') + '</p>';
+      resultEl.innerHTML = '<p class="text-red text-sm" style="margin-top:0.75rem;">'
+        + escapeHtml(data.error || 'Upload failed.') + '</p>'
+        + renderUnreadDocuments(data.rejected, data.out_of_period);
       return;
     }
 
     var s = data.summary;
+    var d = data.documents;
+
     resultEl.innerHTML =
       '<div class="glass-card" style="margin-top:1rem;padding:1rem;">' +
+      (d
+        ? '<div class="upload-summary-row"><span>Documents read</span><span>'
+            + d.transactions + ' of ' + d.attached + '</span></div>'
+          + '<div class="upload-summary-row"><span>Supporting receipts</span><span>'
+            + d.supporting_evidence + '</span></div>'
+        : '') +
       '<div class="upload-summary-row"><span>Transactions parsed</span><span>' + s.transaction_count + '</span></div>' +
       '<div class="upload-summary-row"><span>Money in</span><span class="text-emerald">' + formatCurrency(s.inflow) + '</span></div>' +
       '<div class="upload-summary-row"><span>Money out</span><span class="text-red">' + formatCurrency(s.outflow) + '</span></div>' +
       '<div class="upload-summary-row"><span>Net</span><span>' + formatCurrency(s.net_income) + '</span></div>' +
-      '</div>';
+      '</div>' +
+      renderUnreadDocuments(d && d.rejected, d && d.out_of_period);
 
-    showToast('File uploaded — ' + s.transaction_count + ' transactions ready for analysis.', 'success');
-    if (opts.onUploaded) opts.onUploaded(data.period);
+    /* A PARTIAL IMPORT IS NOT A SUCCESS. If some documents could not be read,
+       the toast says so — otherwise the user is told "uploaded" and analyses a
+       month that is quietly missing records. */
+    var unread = (d && d.rejected ? d.rejected.length : 0);
+    if (unread) {
+      /* THE ANALYSIS IS NOT STARTED AUTOMATICALLY when something was refused.
+         Running it re-renders this page and destroys the list above, so the
+         user would be moved to a dashboard built from an incomplete month
+         having never seen what was missing. They read it, then choose. */
+      resultEl.innerHTML += '<button type="button" class="btn-primary btn-full" '
+        + 'style="margin-top:0.75rem;" data-fg-action="analyse-anyway" '
+        + 'data-period="' + escapeHtml(data.period) + '">'
+        + 'Analyse ' + escapeHtml(getMonthLabel(data.period))
+        + ' without ' + escapeHtml(String(unread)) + ' document'
+        + (unread === 1 ? '' : 's') + '</button>';
+      showToast(s.transaction_count + ' transactions imported — but ' + unread
+        + ' document' + (unread === 1 ? '' : 's') + ' could not be read. See below.', 'warning');
+    } else {
+      showToast('Uploaded — ' + s.transaction_count + ' transactions ready for analysis.', 'success');
+    }
+    /* THE OUTCOME TRAVELS WITH THE CALLBACK. The caller has to know whether
+       anything was refused, because navigating away from this panel destroys
+       the list of documents that were not imported — and that list is the
+       whole point of reporting them. */
+    if (opts.onUploaded) {
+      opts.onUploaded(data.period, {
+        unread: unread,
+        transactions: s.transaction_count,
+        documents: d || null
+      });
+    }
   } catch (e) {
     resultEl.innerHTML = '<p class="text-red text-sm" style="margin-top:0.75rem;">Connection error.</p>';
   }
@@ -816,37 +1744,27 @@ function goToStep1() {
   }
 }
 
+/**
+ * STEP 2 IS NOW IMPORTING DATA, not connecting a wallet.
+ *
+ * THE DEFECT. Onboarding was Business -> Wallet -> Data Source, so the second
+ * thing an SME owner was asked for was an Avalanche crypto wallet — before
+ * they had seen a single figure from their own books. It was skippable, but it
+ * was presented as step 2 of 3, which reads as required.
+ *
+ * The wallet flow is NOT removed. `renderWalletConnectCard` is untouched and
+ * still rendered by Settings > Integrations and by the Contracts page, which is
+ * where it is genuinely needed. Only the sequencing changed.
+ */
 function goToStep2() {
   $onboardStep1.classList.remove('active');
-  $onboardStep2.classList.add('active');
+  // Straight to the data-source step; the wallet step is no longer in the path.
+  $onboardStep3.classList.add('active');
   $progStep1.classList.remove('active');
   $progStep1.classList.add('completed');
   $progStep1.querySelector('.step-number').textContent = '✓';
   $progStep2.classList.add('active');
   if ($progConnector1) $progConnector1.classList.add('filled');
-
-  renderWalletConnectCard('onboarding-wallet-panel', {
-    allowSkip: true,
-    showContinue: true,
-    onSkip: function() {
-      goToStep3();
-      showToast('Wallet skipped — you can add it later in Settings.', 'info');
-    },
-    onVerified: function(address) {
-      appState.walletAddress = address;
-      goToStep3();
-    }
-  });
-}
-
-function goToStep3() {
-  $onboardStep2.classList.remove('active');
-  $onboardStep3.classList.add('active');
-  $progStep2.classList.remove('active');
-  $progStep2.classList.add('completed');
-  $progStep2.querySelector('.step-number').textContent = '✓';
-  $progStep3.classList.add('active');
-  if ($progConnector2) $progConnector2.classList.add('filled');
 
   renderUploadPanel('onboarding-upload-panel', {
     onUploaded: function(period) {
@@ -865,7 +1783,7 @@ function completeOnboarding(walletAddr) {
   // Persist to backend
   fetch('/api/profile', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: mutatingHeaders(),
     body: JSON.stringify({
       name: appState.userName,
       business_name: appState.businessName,
@@ -1013,9 +1931,124 @@ var PAGE_TABS = {
   ]
 };
 
+
+/* ═══════════════════════════════════════════════════════════════
+   IMPORT DATA — the monthly product loop.
+
+   THE DEFECT THIS CLOSES. `renderUploadPanel` had exactly ONE caller: step 3
+   of the one-time onboarding wizard. After onboarding there was no way to
+   import anything — in a product whose entire premise is a monthly financial
+   review. A returning user in February had no route to give us February.
+
+   The panel itself is reused unchanged; what was missing was a destination.
+   ═══════════════════════════════════════════════════════════════ */
+
+function renderImportData() {
+  if ($pageTabs) $pageTabs.innerHTML = '';
+  $pageContent.innerHTML =
+    '<div class="glass-card">'
+    + '<div class="card-title">Import financial data</div>'
+    + '<p class="text-sm text-muted">Upload a bank or accounting CSV export, or the '
+    + 'source documents themselves — invoices, bills and receipts as PDFs. Each '
+    + 'import is analysed on its own, and previous periods stay available.</p>'
+    + '<div id="import-upload-panel"></div>'
+    + '</div>'
+    + '<div class="glass-card section-gap">'
+    + '<div class="card-title">Your imports</div>'
+    + '<div id="import-history"><p class="text-sm text-muted">Loading…</p></div>'
+    + '</div>';
+
+  renderUploadPanel('import-upload-panel', {
+    onUploaded: function (period, info) {
+      /* AFTER AN IMPORT: analyse that period and take the user to it. The
+         month they just gave us is the month they want to see.
+
+         UNLESS SOMETHING WAS NOT IMPORTED. Navigating away destroys the list of
+         documents the server refused, so the user would land on a dashboard
+         built from an incomplete month with no indication that anything is
+         missing. When there is something to read, the analysis still runs but
+         the user stays here to read it. */
+      appState.activeMonth = period;
+      var unread = (info && info.unread) || 0;
+
+      /* Something was refused: the panel now shows what, and an explicit
+         "analyse anyway" action. Starting the review here would re-render this
+         page and take that list away before it could be read. */
+      if (unread) return;
+
+      showToast('Imported ' + getMonthLabel(period) + ' — analysing…', 'info');
+      runMonthlyReview(period).then(function () {
+        loadImportHistory();
+        navigate('overview');
+      });
+    }
+  });
+
+  loadImportHistory();
+}
+
+/** Which periods this tenant actually has, from the server. */
+async function loadImportHistory() {
+  var el = document.getElementById('import-history');
+  if (!el) return;
+  try {
+    var res = await fetch('/api/financial-data/uploads');
+    var data = await res.json();
+    var imports = (data && data.imports) || [];
+    appState.availablePeriods = imports.filter(function (i) { return i.analysed; })
+      .map(function (i) { return i.period; });
+
+    if (!imports.length) {
+      el.innerHTML = '<p class="text-sm text-muted">Nothing imported yet. '
+        + 'Upload your first period above.</p>';
+      return;
+    }
+
+    var h = '<div class="import-list">';
+    imports.forEach(function (i) {
+      h += '<div class="import-row">'
+        + '<div><strong>' + escapeHtml(getMonthLabel(i.period)) + '</strong>'
+        + '<div class="text-xs text-muted">'
+        + (i.analysed ? 'Analysed' : 'Imported — not analysed yet')
+        + (i.analysed && !i.recoverable ? ' · needs re-running' : '')
+        + '</div></div>'
+        + '<button type="button" class="btn-secondary btn-small" onclick="openPeriod(\''
+        + escapeHtml(i.period) + '\')">'
+        + (i.analysed ? 'View' : 'Analyse') + '</button></div>';
+    });
+    h += '</div>';
+    el.innerHTML = h;
+  } catch (e) {
+    el.innerHTML = '<p class="text-sm text-muted">Could not load your imports.</p>';
+  }
+}
+
+/** Switch to a period: recover its analysis if there is one, else run it. */
+function openPeriod(period) {
+  appState.activeMonth = period;
+  navigate('overview');
+  runMonthlyReview(period);
+}
+
 function renderDashboard() {
   if ($pageTabs) $pageTabs.innerHTML = '';
+  // Populate the real period list so the month picker is honest.
+  if (appState.availablePeriods === null) loadAvailablePeriods();
+  // Renewal state is server-computed; refresh it if we have none yet.
+  if (!appState.account) refreshAccount().then(function () { renderOverview(); });
   renderOverview();
+}
+
+/** The periods that actually have a completed analysis. */
+async function loadAvailablePeriods() {
+  try {
+    var res = await fetch('/api/analysis/periods');
+    var d = await res.json();
+    if (d && d.ok) {
+      appState.availablePeriods = (d.periods || []).map(function (p) { return p.period; });
+      if (appState.currentPage === 'overview') renderOverview();
+    }
+  } catch (e) { /* leave null: every month stays clickable */ }
 }
 
 /* Untabbed page: clear the tab bar, then render */
@@ -1025,6 +2058,7 @@ function renderSimplePage(fn) {
 }
 
 function renderTabbedPage(page) {
+  beginRender();   // invalidate any in-flight fetch from the previous tab
   var tabs = PAGE_TABS[page];
   if (!tabs) { renderDashboard(); return; }
   var active = appState.pageTab[page] || tabs[0].key;
@@ -1050,14 +2084,17 @@ function switchTab(page, tab) {
 
 var routes = {
   'overview':      { title: 'Dashboard',          render: renderDashboard },
+  'import':        { title: 'Import Data',        render: function() { renderSimplePage(renderImportData); } },
   'activity':      { title: 'Activity & Actions', render: function() { renderTabbedPage('activity'); } },
   'analytics':     { title: 'Analytics',          render: function() { renderTabbedPage('analytics'); } },
   'concentration': { title: 'Concentration Risk', render: function() { renderTabbedPage('concentration'); } },
   'contracts':     { title: 'Contracts',          render: function() { renderSimplePage(renderContracts); } },
+  'ai':            { title: 'FinGuard AI',         render: function() { renderSimplePage(renderAIController); } },
   'settings':      { title: 'Settings',           render: function() { renderSimplePage(renderSettings); } }
 };
 
 function navigate(page) {
+  beginRender();   // invalidate any in-flight fetch from the previous page
   if (!routes[page]) page = 'overview';
   stopStatusPolling();
   appState.currentPage = page;
@@ -1093,12 +2130,39 @@ window.addEventListener('hashchange', function() {
 });
 
 /* ── 8. Data Fetching ────────────────────────────────────────── */
+/* ── STALE-RENDER GUARD ───────────────────────────────────────────
+   THE DEFECT. Every page renderer fetches its own data and writes the result
+   into the single #page-content element when the promise resolves. Nothing
+   cancelled an in-flight request when the user switched tab, so the SLOWER
+   earlier request landed last and painted the previous tab's figures under the
+   new tab's heading — Executive Reports showing the Forecast's numbers, for
+   instance. Wrong-page figures are worse than a spinner: nothing on screen
+   reveals the mismatch.
+
+   Every navigation bumps this token. A renderer captures it before fetching
+   and discards its own result if the token has moved on. */
+var renderToken = 0;
+
+function beginRender() {
+  renderToken += 1;
+  return renderToken;
+}
+
+/** Is this render still the one the user is waiting for? */
+function isCurrentRender(token) {
+  return token === renderToken;
+}
+
 async function fetchPageData(endpoint) {
+  var token = renderToken;
   try {
     var response = await fetch('/api/' + endpoint);
     if (!response.ok) return null;
     var json = await response.json();
     if (!json.ok) return null;
+    // The user moved on while this was in flight — drop it rather than paint
+    // it over whatever they are looking at now.
+    if (!isCurrentRender(token)) return null;
     return json;
   } catch (e) {
     return null;
@@ -1114,7 +2178,8 @@ var ANALYSIS_STEPS = [
   'Writing the AI narrative'
 ];
 
-function startAnalysisProgress(month) {
+function startAnalysisProgress(month, label) {
+  var periodLabel = label || getMonthLabel(month);
   var steps = ANALYSIS_STEPS.map(function(s, i) {
     return '<li class="ap-step" data-i="' + i + '"><span class="ap-mark"></span>' + escapeHtml(s) + '</li>';
   }).join('');
@@ -1124,10 +2189,18 @@ function startAnalysisProgress(month) {
     : '';
   $pageContent.innerHTML =
     '<div class="analysis-progress glass-card">' +
-      '<div class="ap-head"><span class="ap-spinner"></span><div>' +
+      '<div class="orb-stage" role="status" aria-live="polite" aria-label="Analysis in progress">' +
+        '<div class="orb-loader">' +
+          '<span class="orb orb-a"></span>' +
+          '<span class="orb orb-b"></span>' +
+          '<span class="orb orb-c"></span>' +
+          '<span class="orb orb-core"></span>' +
+        '</div>' +
+      '</div>' +
+      '<div class="ap-headline">' +
         '<div class="ap-title">Running your monthly review…</div>' +
-        '<div class="ap-sub">Analyzing ' + escapeHtml(getMonthLabel(month)) + ' — this can take up to a minute on the free AI tier.</div>' +
-      '</div></div>' +
+        '<div class="ap-sub">Analyzing ' + escapeHtml(periodLabel) + ' — this can take up to a minute on the free AI tier.</div>' +
+      '</div>' +
       '<ul class="ap-steps">' + steps + '</ul>' +
       '<div class="ap-note">' + icon('check-circle') + ' You can switch to other tabs while this runs — we’ll notify you when the analysis is ready.</div>' +
       notifBtn +
@@ -1176,10 +2249,15 @@ function notifyAnalysisReady(month, ok) {
   }
 }
 
-async function runMonthlyReview(month) {
+async function runMonthlyReview(month, opts) {
+  opts = opts || {};
+  // Reset until this run actually returns something; see appState.hasAnalysis.
+  appState.hasAnalysis = false;
+  var periodLabel = scopeLabelFor(month, opts);
   appState.activeMonth = month;
-  $analysisMonth.innerHTML = icon('clock') + ' Analyzing ' + escapeHtml(getMonthLabel(month)) + '…';
-  showStatus('Running monthly review…');
+  appState.activeScope = (opts.granularity && opts.granularity !== 'monthly') ? opts : null;
+  $analysisMonth.innerHTML = icon('clock') + ' Analyzing ' + escapeHtml(periodLabel) + '…';
+  showStatus('Running ' + (opts.granularity || 'monthly') + ' review…');
   appState.isLoading = true;
 
   /* Ask for notification permission within this click gesture so we can alert when done. */
@@ -1197,22 +2275,33 @@ async function runMonthlyReview(month) {
     }
   });
 
-  startAnalysisProgress(month);
+  startAnalysisProgress(month, periodLabel);
 
   var ok = false;
   try {
     var res = await fetch('/api/monthly-review', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ month: month })
+      headers: mutatingHeaders(),
+      body: JSON.stringify(Object.assign({ month: month }, opts))
     });
     var data = await res.json();
 
     if (data.ok) {
       appState.cachedData = data;
       ok = true;
-      $analysisMonth.innerHTML = icon('calendar') + ' ' + escapeHtml(getMonthLabel(month));
-      showToast('Analysis complete for ' + getMonthLabel(month), 'success');
+      appState.hasAnalysis = true;
+      /* IS THIS THE USER'S DATA, OR THE DEMO SET? With nothing imported the
+         analysis falls back to a fictional business, and the result is
+         otherwise indistinguishable from a real one. The server reports the
+         source; the banner below is driven from it. */
+      appState.isDemoData = (data.data_quality && data.data_quality.source === 'demo')
+        || (data.scope && data.scope.source === 'demo') || false;
+      var doneLabel = (data.scope && data.scope.label) || periodLabel;
+      $analysisMonth.innerHTML = icon('calendar') + ' ' + escapeHtml(doneLabel);
+      showToast(appState.isDemoData
+        ? 'Sample analysis ready for ' + doneLabel + ' — import your data for a real one.'
+        : 'Analysis complete for ' + doneLabel,
+      appState.isDemoData ? 'warning' : 'success');
       notifyAiFailureIfAny(data.aiAnalysis);
     } else {
       showToast('Analysis failed: ' + (data.error || 'Unknown error'), 'error');
@@ -1292,19 +2381,267 @@ function fundexDonut(segments) {
 }
 
 /* ── Overview (Dashboard) ────────────────────────────────────── */
-function renderOverview() {
-  var months = generateRecentMonths(12);
-  var monthGrid = '<div class="glass-card section-gap"><div class="card-title">Select Analysis Month</div><div class="month-picker-grid">';
-  months.forEach(function(m) {
-    var isActive = appState.activeMonth === m ? ' active' : '';
-    monthGrid += '<button class="month-btn' + isActive + '" data-month="' + m + '" onclick="runMonthlyReview(\'' + m + '\')">' + getMonthLabel(m) + '</button>';
-  });
-  monthGrid += '</div></div>';
+/* ── Daily Monitoring Report (dashboard hero) ─────────────────── */
+function drStat(ic, value, label, cls) {
+  return '<div class="dr-stat"><div class="dr-stat-ic">' + icon(ic) + '</div>' +
+    '<div><div class="dr-stat-val ' + (cls || '') + '">' + escapeHtml(String(value)) + '</div>' +
+    '<div class="dr-stat-label">' + escapeHtml(label) + '</div></div></div>';
+}
 
+function dailyReportHtml() {
+  var status = appState.monitoringStatus;
+  var m = (status && status.monitoring) || {};
+  var enabled = Boolean(m.enabled);
+  var alerts = (typeof notifState !== 'undefined' && notifState.items) || [];
+  var unread = (typeof notifState !== 'undefined' && notifState.unread) || 0;
+  var newLast = m.lastNewIssues != null ? m.lastNewIssues : 0;
+  var freqLabel = (MONITOR_FREQ_LABELS && MONITOR_FREQ_LABELS[m.frequency]) || 'Daily';
+  var today;
+  try { today = new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }); }
+  catch (e) { today = ''; }
+
+  var statusPill = enabled
+    ? '<span class="dr-pill dr-pill-on">' + icon('check-circle') + ' ' + escapeHtml(freqLabel) + '</span>'
+    : '<span class="dr-pill dr-pill-off">Off</span>';
+
+  var html = '<div class="glass-card daily-report" id="daily-report">';
+  html += '<div class="dr-head"><div><div class="dr-title">' + icon('sliders') + ' Daily Monitoring Report</div>' +
+    '<div class="dr-sub">' + escapeHtml(today) + ' · automatic financial simulation</div></div>' + statusPill + '</div>';
+
+  var canSchedule = status && status.can_schedule;
+  if (!enabled && !canSchedule) {
+    html += '<div class="dr-off">' +
+      '<p class="text-sm text-muted">Run a fresh analysis any time — unlimited on your plan. ' +
+      'Automatic scheduled monitoring is a Growth capability.</p>' +
+      '<div class="dr-actions" style="margin-top:0;">' +
+        '<button type="button" class="btn-primary btn-small" onclick="syncDailyReport()">' + icon('clock') + ' Run analysis now</button>' +
+        '<button type="button" class="btn-ghost btn-small" onclick="showUpgradeModal(\'Automatic scheduled monitoring is available on the Growth and Custom AI plans. Manual analysis stays unlimited on Starter.\')">' + lockIcon() + ' Automate this</button>' +
+      '</div></div>';
+  } else if (!enabled) {
+    html += '<div class="dr-off">' +
+      '<p class="text-sm text-muted">Continuous monitoring is off. Turn it on to automatically re-run your financial analysis on a schedule and be alerted the moment a new issue appears.</p>' +
+      '<button type="button" class="btn-primary btn-small" onclick="enableMonitoringFromDashboard()">' + icon('clock') + ' Turn on monitoring</button>' +
+    '</div>';
+  } else {
+    html += '<div class="dr-stats">';
+    html += drStat('alert-triangle', newLast, 'New issues last sync', newLast > 0 ? 'text-red' : 'text-emerald');
+    html += drStat('bot', unread, 'Unread alerts', unread > 0 ? 'text-amber' : 'text-muted');
+    html += drStat('check-circle', alerts.length, 'Total alerts', 'text-muted');
+    html += drStat('clock', freqLabel, 'Sync cadence', 'text-muted');
+    html += '</div>';
+    html += '<div class="dr-meta">' +
+      '<span>Last sync: <strong>' + (m.lastRunAt ? formatDateTime(m.lastRunAt) : 'Never') + '</strong></span>' +
+      '<span>Next due: <strong>' + (m.nextDueAt ? formatDateTime(m.nextDueAt) : 'Soon') + '</strong></span>' +
+      '<span>Status: <strong class="' + (m.lastStatus === 'error' ? 'text-red' : 'text-emerald') + '">' + escapeHtml(m.lastStatus || '—') + '</strong></span>' +
+    '</div>';
+  }
+
+  html += '<div class="dr-alerts-head"><div class="card-title" style="margin:0;">Latest alerts</div>' +
+    '<button type="button" class="see-all" onclick="toggleNotifPanel()">Open all</button></div>';
+  if (alerts.length) {
+    html += '<div class="dr-alerts">';
+    alerts.slice(0, 5).forEach(function(n) {
+      html += '<div class="dr-alert"><span class="notif-dot notif-dot-' + (n.level || 'low') + '"></span>' +
+        '<div class="dr-alert-main"><div class="dr-alert-title">' + escapeHtml(n.title || 'Alert') + '</div>' +
+        '<div class="dr-alert-body">' + escapeHtml(n.body || '') + '</div></div>' +
+        '<div class="dr-alert-time">' + escapeHtml(formatRelativeTime(n.ts)) + '</div></div>';
+    });
+    html += '</div>';
+  } else if (appState.hasAnalysis) {
+    // Analysed, and genuinely nothing flagged.
+    html += '<div class="dr-empty">' + icon('check-circle') + ' No alerts — your books look clean.</div>';
+  } else {
+    /* NOTHING HAS BEEN ANALYSED YET. "Your books look clean" is an audit
+       RESULT, and stating it before any data has been examined tells a brand
+       new user their finances are fine on the strength of nothing. */
+    html += '<div class="dr-empty">' + icon('upload') +
+      ' No data yet — import your financial records to see alerts.</div>';
+  }
+
+  html += '<div class="dr-actions">' +
+    '<button type="button" class="btn-secondary btn-small" onclick="syncDailyReport()">' + icon('clock') + ' Sync now</button>' +
+    '<button type="button" class="btn-ghost btn-small" onclick="navigate(\'settings\');switchSettingsSection(\'monitoring\');">Monitoring settings</button>' +
+  '</div>';
+  html += '</div>';
+  return html;
+}
+
+function weeksInMonth(month) {
+  var p = String(month).split('-').map(Number);
+  var dim = new Date(p[0], p[1], 0).getDate();
+  var weeks = [];
+  for (var w = 1; (w - 1) * 7 + 1 <= dim; w++) {
+    var sd = (w - 1) * 7 + 1;
+    var ed = Math.min(sd + 6, dim);
+    weeks.push({ week: w, label: sd + '–' + ed });
+  }
+  return weeks;
+}
+function daysInMonthList(month) {
+  var p = String(month).split('-').map(Number);
+  var dim = new Date(p[0], p[1], 0).getDate();
+  var out = [];
+  for (var d = 1; d <= dim; d++) out.push(month + '-' + String(d).padStart(2, '0'));
+  return out;
+}
+function scopeLabelFor(month, opts) {
+  if (!opts || !opts.granularity || opts.granularity === 'monthly') return getMonthLabel(month);
+  if (opts.granularity === 'weekly') return 'Week ' + (opts.week || 1) + ' · ' + getMonthLabel(month);
+  var p = String(opts.date || '').split('-');
+  var names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return p[1] ? names[Number(p[1]) - 1] + ' ' + Number(p[2]) + ', ' + p[0] : getMonthLabel(month);
+}
+
+function monthSelectorCompactHtml(prompt) {
+  var g = appState.analysisGranularity || 'monthly';
+  var head = '<div class="card-head"><div class="card-title" style="margin:0;">Analyze your finances</div>' +
+    '<div class="analysis-gran"><span class="text-xs text-muted">Period</span>' +
+    '<select class="settings-input analysis-gran-select" onchange="onAnalysisGranularityChange(this.value)">' +
+      '<option value="monthly"' + (g === 'monthly' ? ' selected' : '') + '>Monthly</option>' +
+      '<option value="weekly"' + (g === 'weekly' ? ' selected' : '') + '>Weekly</option>' +
+      '<option value="daily"' + (g === 'daily' ? ' selected' : '') + '>Daily</option>' +
+    '</select></div></div>';
+  return '<div class="glass-card section-gap month-select-card">' + head +
+    '<div id="analysis-scope-body">' + analysisScopeBodyHtml(prompt) + '</div></div>';
+}
+
+function analysisScopeBodyHtml(prompt) {
+  var g = appState.analysisGranularity || 'monthly';
+  var months = generateRecentMonths(12);
+
+  if (g === 'monthly') {
+    /* REAL PERIODS, NOT GENERATED ONES.
+       This offered the last twelve calendar months regardless of whether any
+       data existed for them, so most buttons ran an analysis of nothing — or,
+       worse, of the demo dataset. `availablePeriods` comes from the server and
+       lists the periods that genuinely have an analysis; anything else is
+       shown as unavailable with a route to import it. */
+    var have = appState.availablePeriods;
+    var grid = months.map(function(m) {
+      var isActive = appState.activeMonth === m ? ' active' : '';
+      var known = !have || have.indexOf(m) !== -1;
+      if (known) {
+        return '<button class="month-btn' + isActive + '" data-month="' + m + '" onclick="runMonthlyReview(\'' + m + '\')">' + getMonthLabel(m) + '</button>';
+      }
+      return '<button class="month-btn month-btn-empty" data-month="' + m + '" title="No data imported for this period" onclick="navigate(\'import\')">' + getMonthLabel(m) + '</button>';
+    }).join('');
+    var note = (have && have.length === 0)
+      ? '<div class="text-xs text-muted" style="margin-bottom:0.6rem;">No periods imported yet — <a href="#import" onclick="navigate(\'import\');return false;">import your data</a> to begin.</div>'
+      : (prompt ? '<div class="text-xs text-muted" style="margin-bottom:0.6rem;">Pick a month for a full deep-dive analysis. Dimmed months have no imported data.</div>' : '');
+    return note + '<div class="month-picker-grid">' + grid + '</div>';
+  }
+
+  /* weekly / daily: choose the month first, then the week or day */
+  var selMonth = appState.analysisScopeMonth || months[0];
+  if (months.indexOf(selMonth) === -1) selMonth = months[0];
+  var monthOpts = months.map(function(m) {
+    return '<option value="' + m + '"' + (m === selMonth ? ' selected' : '') + '>' + getMonthLabel(m) + '</option>';
+  }).join('');
+
+  var html = '<div class="scope-row"><div class="scope-field"><label class="whatif-label">Month</label>' +
+    '<select class="settings-input" id="scope-month" onchange="onScopeMonthChange(this.value)">' + monthOpts + '</select></div>';
+
+  if (g === 'weekly') {
+    var weeks = weeksInMonth(selMonth);
+    if (!appState.analysisScopeWeek || appState.analysisScopeWeek > weeks.length) appState.analysisScopeWeek = 1;
+    var wbtns = weeks.map(function(w) {
+      var active = appState.analysisScopeWeek === w.week ? ' active' : '';
+      return '<button type="button" class="scope-chip' + active + '" onclick="selectScopeWeek(' + w.week + ')">Week ' + w.week +
+        '<span class="scope-chip-sub">' + w.label + '</span></button>';
+    }).join('');
+    html += '<div class="scope-field scope-field-wide"><label class="whatif-label">Week</label><div class="scope-chips">' + wbtns + '</div></div>';
+  } else {
+    var days = daysInMonthList(selMonth);
+    var selDay = (appState.analysisScopeDay && appState.analysisScopeDay.slice(0, 7) === selMonth) ? appState.analysisScopeDay : days[0];
+    appState.analysisScopeDay = selDay;
+    var dayOpts = days.map(function(dd) {
+      return '<option value="' + dd + '"' + (dd === selDay ? ' selected' : '') + '>' + Number(dd.slice(8)) + '</option>';
+    }).join('');
+    html += '<div class="scope-field"><label class="whatif-label">Day</label>' +
+      '<select class="settings-input" id="scope-day" onchange="appState.analysisScopeDay=this.value">' + dayOpts + '</select></div>';
+  }
+
+  html += '<div class="scope-field scope-run"><button type="button" class="btn-primary" onclick="runScopedAnalysis()">' + icon('play') + ' Run analysis</button></div>';
+  html += '</div>';
+  return html;
+}
+
+function rerenderScopeBody() {
+  var el = document.getElementById('analysis-scope-body');
+  if (el) el.innerHTML = analysisScopeBodyHtml(false);
+}
+function onAnalysisGranularityChange(v) {
+  appState.analysisGranularity = v;
+  if (!appState.analysisScopeMonth) appState.analysisScopeMonth = generateRecentMonths(1)[0];
+  rerenderScopeBody();
+}
+function onScopeMonthChange(m) {
+  appState.analysisScopeMonth = m;
+  appState.analysisScopeWeek = 1;
+  appState.analysisScopeDay = m + '-01';
+  rerenderScopeBody();
+}
+function selectScopeWeek(w) {
+  appState.analysisScopeWeek = w;
+  rerenderScopeBody();
+}
+function runScopedAnalysis() {
+  var g = appState.analysisGranularity || 'monthly';
+  var monthEl = document.getElementById('scope-month');
+  var month = (monthEl && monthEl.value) || appState.analysisScopeMonth;
+  if (g === 'monthly') { runMonthlyReview(month); return; }
+  if (g === 'weekly') { runMonthlyReview(month, { granularity: 'weekly', week: appState.analysisScopeWeek || 1 }); return; }
+  var dayEl = document.getElementById('scope-day');
+  var day = (dayEl && dayEl.value) || appState.analysisScopeDay || (month + '-01');
+  runMonthlyReview(month, { granularity: 'daily', date: day });
+}
+
+function refreshDailyReport() {
+  Promise.all([
+    fetch('/api/monitoring').then(function(r) { return r.json(); }).catch(function() { return null; }),
+    (typeof loadNotifications === 'function' ? loadNotifications() : Promise.resolve())
+  ]).then(function(res) {
+    if (res[0] && res[0].ok) appState.monitoringStatus = res[0];
+    var node = document.getElementById('daily-report');
+    if (node && appState.currentPage === 'overview') node.outerHTML = dailyReportHtml();
+  });
+}
+
+function syncDailyReport() {
+  showToast('Running your daily simulation…', 'info');
+  fetch('/api/monitoring/run', { method: 'POST', headers: mutatingHeaders(), body: '{}' })
+    .then(function(r) { return r.json(); }).then(function(d) {
+      if (d && d.ok) {
+        var n = (d.result && d.result.newIssues) || 0;
+        showToast(n > 0 ? (n + ' new issue' + (n > 1 ? 's' : '') + ' found') : 'Simulation complete — no new issues', 'success');
+        if (d.monitoring) appState.monitoringStatus = Object.assign({}, appState.monitoringStatus || {}, { monitoring: d.monitoring });
+        if (typeof applyNotifications === 'function') applyNotifications(d.notifications || [], d.unread || 0);
+        var node = document.getElementById('daily-report');
+        if (node && appState.currentPage === 'overview') node.outerHTML = dailyReportHtml();
+      } else { showToast('Sync failed.', 'error'); }
+    }).catch(function() { showToast('Sync failed.', 'error'); });
+}
+
+function enableMonitoringFromDashboard() {
+  fetch('/api/monitoring', { method: 'POST', headers: mutatingHeaders(), body: JSON.stringify({ enabled: true }) })
+    .then(function(r) { return r.json(); }).then(function(d) {
+      if (d && d.ok) {
+        appState.monitoringStatus = d;
+        showToast('Monitoring on (' + ((MONITOR_FREQ_LABELS && MONITOR_FREQ_LABELS[d.monitoring.frequency]) || 'Daily') + ')', 'success');
+        if (window.Notification && Notification.permission === 'default') { try { Notification.requestPermission(); } catch (e) {} }
+        syncDailyReport();
+      } else { showToast('Could not enable monitoring.', 'error'); }
+    }).catch(function() { showToast('Could not enable monitoring.', 'error'); });
+}
+
+function renderOverview() {
   var d = appState.cachedData;
 
   if (!d) {
-    $pageContent.innerHTML = monthGrid + renderEmptyState('calendar', 'No Month Selected', 'Select a target month above to begin your financial analysis.');
+    $pageContent.innerHTML = renderRenewalBanner() + dailyReportHtml() +
+      renderEmptyState('bar-chart', 'No deep analysis yet', 'Your daily monitoring report is above. Run a full month analysis below for the complete dashboard.') +
+      monthSelectorCompactHtml(true);
+    refreshDailyReport();
     return;
   }
 
@@ -1357,7 +2694,9 @@ function renderOverview() {
   }
 
   var monthLabel = getMonthLabel(appState.activeMonth || '');
-  var html = monthGrid;
+  /* Renewal state first: whether the plan is lapsing changes how everything
+     below it should be read. */
+  var html = renderRenewalBanner() + dailyReportHtml();
 
   /* ── Stat cards row (Fundex style: icon + value + delta) ── */
   var ncf = cashflow.net_cash_flow;
@@ -1365,8 +2704,13 @@ function renderOverview() {
   html += '<div class="stat-row">';
   html += fundexStat('shield', 'Financial Health',
     (hasHealthScore ? healthScore : '—') + '<span class="stat-unit">/100</span>',
-    { valueClass: !hasHealthScore ? 'text-muted' : healthScore >= 70 ? 'text-emerald' : healthScore >= 40 ? 'text-amber' : 'text-red',
-      sub: hasHealthScore ? (healthScore >= 70 ? 'Strong position' : healthScore >= 40 ? 'Needs attention' : 'At risk') : 'No score yet' });
+    // The category is the ENGINE's (health.risk_category), so the label and the
+    // colour agree with the score the engine published.
+    { valueClass: !hasHealthScore ? 'text-muted'
+        : categoryClass(health.risk_category || scoreCategory(healthScore)),
+      sub: hasHealthScore
+        ? (health.risk_category || scoreCategory(healthScore) || 'Scored')
+        : 'No score yet' });
   html += fundexStat('wallet', 'Cash Runway',
     cashRunway + '<span class="stat-unit"> days</span>',
     { sub: 'At current burn rate' });
@@ -1455,7 +2799,10 @@ function renderOverview() {
   html += '</div>'; /* /dash-rail */
   html += '</div>'; /* /dash-grid */
 
+  html += monthSelectorCompactHtml(false);
+
   $pageContent.innerHTML = html;
+  refreshDailyReport();
 }
 
 /* ── Financial Health ────────────────────────────────────────── */
@@ -1469,15 +2816,29 @@ function renderFinancialHealth() {
     }
 
     var h = data.health || data.data || data;
-    var overall = h.overall_score || h.score || 0;
+    // JOB 7: `|| 0` painted an insufficient-evidence result as a score of ZERO
+    // — the visual signature of total collapse — on the app's flagship widget.
+    var overallRaw = (h.overall_score != null) ? h.overall_score : h.score;
+    var scored = h.available !== false && isMeasured(overallRaw);
+    var overall = scored ? overallRaw : null;
     var category = h.risk_category || h.category || 'Unknown';
     var components = h.component_scores || h.components || {};
     var trend = h.trend_note || h.trend || '';
 
-    var categoryColor = category.toLowerCase().includes('low') ? 'text-emerald' :
-                        category.toLowerCase().includes('high') ? 'text-red' : 'text-amber';
+    // JOB 7: this tested for 'low'/'high', which no backend category has been
+    // called since the registry defined them (Excellent/Good/Fair/Poor/Critical/
+    // Unknown) — so EVERY score rendered amber, including "Excellent" and
+    // "Critical". The bands are the server's; the client only maps the label it
+    // was given to a colour, and shows an unscored result as neutral.
+    var categoryColor = !scored ? 'text-muted' :
+                        /excellent|good/i.test(category) ? 'text-emerald' :
+                        /fair/i.test(category) ? 'text-amber' :
+                        /poor|critical/i.test(category) ? 'text-red' : 'text-muted';
 
-    var html = '<div class="grid-2-1">';
+    /* The API's own account of what this score does not rest on, read before
+       the number it qualifies. Same helper as every other page. */
+    var html = renderDisclosure(data.disclosure);
+    html += '<div class="grid-2-1">';
 
     /* Left: Score display + bars */
     html += '<div class="glass-card">';
@@ -1492,11 +2853,23 @@ function renderFinancialHealth() {
     if (compKeys.length > 0) {
       html += '<div class="card-title">Component Scores</div>';
       compKeys.forEach(function(key) {
-        var val = typeof components[key] === 'object' ? (components[key].score || 0) : components[key];
+        // JOB 7 CRASH FIX: an unmeasured component is null, and `typeof null`
+        // is 'object', so this read null.score and threw — bricking the whole
+        // page on the most common insufficient-evidence case.
+        var raw = components[key];
+        var val = (raw && typeof raw === 'object') ? raw.score : raw;
         var label = key.replace(/_/g, ' ').replace(/\b\w/g, function(l) { return l.toUpperCase(); });
         html += '<div class="score-bar-container">';
-        html += '<div class="score-bar-label"><span>' + escapeHtml(label) + '</span><span>' + val + '/100</span></div>';
-        html += '<div class="score-bar-track"><div class="score-bar-fill ' + scoreBarClass(val) + '" style="width:' + val + '%"></div></div>';
+        if (!isMeasured(val)) {
+          // Shown, but explicitly as NOT measured — never as an empty red bar,
+          // which reads as a score of zero.
+          html += '<div class="score-bar-label"><span>' + escapeHtml(label) + '</span>'
+            + '<span class="text-muted">Not measured</span></div>';
+          html += '<div class="score-bar-track"><div class="score-bar-fill score-unmeasured" style="width:100%"></div></div>';
+        } else {
+          html += '<div class="score-bar-label"><span>' + escapeHtml(label) + '</span><span>' + val + '/100</span></div>';
+          html += '<div class="score-bar-track"><div class="score-bar-fill ' + scoreBarClass(val) + '" style="width:' + val + '%"></div></div>';
+        }
         html += '</div>';
       });
     }
@@ -1534,14 +2907,29 @@ function renderCashFlow() {
     }
 
     var cf = data.cashflow || data.data || data;
-    var runway = cf.runway_days || cf.cash_runway || '—';
-    var netCF = cf.net_cash_flow || 0;
-    var burn = cf.monthly_burn || cf.burn_rate || 0;
+    // JOB 7: `||` also swallowed a legitimate runway of 0 — the most dangerous
+    // value there is. Measured-ness is now tested explicitly.
+    var runwayRaw = (cf.runway_days != null) ? cf.runway_days : cf.cash_runway;
+    var runwayKnown = isMeasured(runwayRaw);
+    var runway = runwayKnown ? runwayRaw : (cf.never_depletes ? 'No limit' : 'Not measured');
+    /* `|| 0` HERE DEFEATED THE isMeasured() GUARD BELOW.
+       An unmeasured net cash flow was coerced to 0 before the guard ran, so it
+       rendered "KES 0" in the POSITIVE colour — the same JOB 7 defect this file
+       fixed elsewhere, still live on this page. Both values stay null when
+       unmeasured; formatCurrency() already renders null as the unmeasured
+       sentinel rather than a zero amount. */
+    var netCF = (cf.net_cash_flow != null) ? cf.net_cash_flow : null;
+    var burn = (cf.monthly_burn != null) ? cf.monthly_burn
+      : ((cf.burn_rate != null) ? cf.burn_rate : null);
     var liquidity = cf.liquidity_ratio || '—';
     var findings = cf.findings || [];
     var recommendations = cf.recommendations || [];
 
     var html = '';
+
+    /* The API's own account of what this page cannot show, and why. Placed
+       FIRST so it is read before the figures it qualifies. */
+    html += renderDisclosure(data.disclosure);
 
     /* Warnings */
     if (typeof runway === 'number' && runway < 30) {
@@ -1555,9 +2943,10 @@ function renderCashFlow() {
 
     /* KPI Row */
     html += '<div class="kpi-row">';
-    html += '<div class="kpi-card"><div class="kpi-label">Cash Runway</div><div class="kpi-value ' + (runway < 30 ? 'text-red' : runway < 60 ? 'text-amber' : 'text-emerald') + '">' + runway + ' <span class="text-muted text-sm">days</span></div></div>';
-    html += '<div class="kpi-card"><div class="kpi-label">Net Cash Flow</div><div class="kpi-value ' + (netCF >= 0 ? 'text-emerald' : 'text-red') + '">' + formatCurrency(netCF) + '</div></div>';
-    html += '<div class="kpi-card"><div class="kpi-label">Monthly Burn</div><div class="kpi-value">' + formatCurrency(burn) + '</div></div>';
+    html += '<div class="kpi-card"><div class="kpi-label">Cash Runway</div><div class="kpi-value ' + (!runwayKnown ? (cf.never_depletes ? 'text-emerald' : 'text-muted')
+        : runway < 30 ? 'text-red' : runway < 60 ? 'text-amber' : 'text-emerald') + '">' + runway + (runwayKnown ? ' <span class="text-muted text-sm">days</span>' : '') + '</div></div>';
+    html += '<div class="kpi-card"><div class="kpi-label">Net Cash Flow</div><div class="kpi-value ' + (!isMeasured(netCF) ? 'text-muted' : netCF >= 0 ? 'text-emerald' : 'text-red') + '">' + formatCurrency(netCF) + '</div></div>';
+    html += '<div class="kpi-card"><div class="kpi-label">Monthly Burn</div><div class="kpi-value ' + (isMeasured(burn) ? '' : 'text-muted') + '">' + formatCurrency(burn) + '</div></div>';
     html += '<div class="kpi-card"><div class="kpi-label">Liquidity Ratio</div><div class="kpi-value">' + liquidity + '</div></div>';
     html += '</div>';
 
@@ -1586,7 +2975,7 @@ function renderForecast() {
   $pageContent.innerHTML = renderLoadingShimmer(3);
   fetch('/api/forecast', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: mutatingHeaders(),
     body: JSON.stringify({ month: appState.activeMonth || null })
   }).then(function(r) { return r.json(); }).then(function(data) {
     if (!data || !data.ok) {
@@ -1597,28 +2986,32 @@ function renderForecast() {
     var fmt = function(n) { return formatCurrency(n); };
     var statusClass = f.status === 'surplus' ? 'text-emerald' : f.status === 'critical' ? 'text-red' : 'text-amber';
     var statusLabel = f.status === 'surplus' ? 'Cash-positive' : f.status === 'critical' ? 'Cash-critical' : 'Burning cash';
-    var daysLabel = f.days_to_zero != null ? (f.days_to_zero + ' days') : (f.monthly_net >= 0 ? 'No depletion' : '—');
+    // JOB 7: `null >= 0` is true, so an unknown net cash flow reported an
+    // affirmative "No depletion" all-clear. Not measuring is not good news.
+    var daysLabel = f.days_to_zero != null ? (f.days_to_zero + ' days')
+      : !isMeasured(f.monthly_net) ? 'Not measured'
+        : f.monthly_net >= 0 ? 'No depletion' : UNMEASURED;
 
     var html = '<div class="stat-row">';
     html += fundexStat('wallet', 'Cash on hand', fmt(f.starting_cash), { sub: 'Starting balance' });
-    html += fundexStat('trending-up', 'Monthly net', fmt(f.monthly_net), { valueClass: f.monthly_net >= 0 ? 'text-emerald' : 'text-red', sub: f.monthly_net >= 0 ? 'Surplus' : 'Burn rate' });
+    html += fundexStat('trending-up', 'Monthly net', fmt(f.monthly_net), { valueClass: !isMeasured(f.monthly_net) ? 'text-muted' : f.monthly_net >= 0 ? 'text-emerald' : 'text-red', sub: !isMeasured(f.monthly_net) ? 'Not measured' : f.monthly_net >= 0 ? 'Surplus' : 'Burn rate' });
     html += fundexStat('clock', 'Runs out in', daysLabel, { valueClass: statusClass, sub: statusLabel });
-    html += fundexStat('bar-chart', 'In 90 days', fmt(f.horizons[2].projected_balance), { valueClass: f.horizons[2].projected_balance >= 0 ? 'text-emerald' : 'text-red', sub: 'Projected balance' });
+    html += fundexStat('bar-chart', 'In 90 days', fmt(f.horizons[2].projected_balance), { valueClass: !isMeasured(f.horizons[2].projected_balance) ? 'text-muted' : f.horizons[2].projected_balance >= 0 ? 'text-emerald' : 'text-red', sub: 'Projected balance' });
     html += '</div>';
 
     html += '<div class="dash-grid"><div class="dash-main">';
 
     var bars = f.series.map(function(s) {
-      return { label: s.label, value: s.balance, display: fmt(s.balance), color: s.balance >= 0 ? '#22c55e' : '#ef4444' };
+      return { label: s.label, value: s.balance, display: fmt(s.balance), color: !isMeasured(s.balance) ? '#94a3b8' : s.balance >= 0 ? '#22c55e' : '#ef4444' };
     });
-    html += '<div class="glass-card chart-card"><div class="chart-head"><div><div class="chart-title">Projected cash balance</div>' +
-      '<div class="chart-sub">At current run-rate · next 90 days</div></div>' +
+    html += '<div class="glass-card chart-card"><div class="chart-head"><div><div class="chart-title">Cash Flow Forecast</div>' +
+      '<div class="chart-sub">Calculated from your run-rate · next 90 days · included on every plan</div></div>' +
       '<span class="chart-period">' + escapeHtml(getMonthLabel(data.month || '')) + '</span></div>' + fundexBarChart(bars) + '</div>';
 
     html += '<div class="glass-card chart-card"><div class="card-head"><div class="chart-title">Projection detail</div></div>' +
       '<table class="data-table"><thead><tr><th>Horizon</th><th>Projected balance</th></tr></thead><tbody>';
     f.horizons.forEach(function(h) {
-      html += '<tr><td>' + h.days + ' days</td><td class="' + (h.projected_balance >= 0 ? 'text-emerald' : 'text-red') + '">' + fmt(h.projected_balance) + '</td></tr>';
+      html += '<tr><td>' + h.days + ' days</td><td class="' + (!isMeasured(h.projected_balance) ? 'text-muted' : h.projected_balance >= 0 ? 'text-emerald' : 'text-red') + '">' + fmt(h.projected_balance) + '</td></tr>';
     });
     if (f.optimistic_30d_balance != null) {
       html += '<tr><td class="text-muted">+30d if receivables collected (' + fmt(f.overdue_receivables) + ')</td><td class="text-emerald">' + fmt(f.optimistic_30d_balance) + '</td></tr>';
@@ -1627,29 +3020,224 @@ function renderForecast() {
     html += '</div>'; /* /dash-main */
 
     html += '<div class="dash-rail">';
-    html += '<div class="glass-card"><div class="card-title">' + icon('bot') + ' AI Forecast Advisor</div>';
     var ai = data.ai || {};
+    var advisorLocked = (ai.reason === 'upgrade_required');
+    html += '<div class="glass-card' + (advisorLocked ? ' advisor-locked' : '') + '">' +
+      '<div class="card-title">' + (advisorLocked ? lockIcon() : icon('bot')) + ' AI Cash Flow Advisor' +
+      (advisorLocked ? '<span class="locked-badge" style="margin-left:auto;">' + escapeHtml(featureRequiredPlan('ai_forecast_advisory')) + '</span>' : '') +
+      '</div>';
     if (ai.ok && ai.text) {
       html += '<p class="text-sm" style="line-height:1.7;white-space:pre-wrap;">' + escapeHtml(ai.text) + '</p>';
+    } else if (advisorLocked) {
+      html += '<p class="text-sm text-muted">Your <strong>Cash Flow Forecast</strong> above is complete and always free — every number, horizon and runway figure is yours.</p>' +
+        '<p class="text-sm text-muted" style="margin-top:0.5rem;">The <strong>AI Cash Flow Advisor</strong> adds the interpretation: what the trend means, which risks matter first, and what to do about them.</p>' +
+        '<ul class="locked-list" style="margin-top:0.6rem;">' +
+          '<li>Reads your forecast and explains the outlook in plain language</li>' +
+          '<li>Prioritises the risks that actually threaten your runway</li>' +
+          '<li>Recommends concrete next actions</li>' +
+        '</ul>' +
+        '<button type="button" class="btn-primary btn-small" onclick="showUpgradeModal(\'' + escapeHtml(upgradeMessage('ai_forecast_advisory')) + '\')">Unlock the AI Advisor</button>';
     } else if (ai.reason === 'insufficient_credits') {
-      html += '<p class="text-sm text-muted">You’re out of AI credits this month. The forecast numbers are free — upgrade to Pro or add your own API key for the AI outlook.</p>' +
+      html += '<p class="text-sm text-muted">You’re out of AI credits this month. Your Cash Flow Forecast above is unaffected — top up or add your own API key for the AI Advisor.</p>' +
         '<button type="button" class="btn-primary btn-small" style="margin-top:0.6rem;" onclick="navigate(\'settings\')">Upgrade / add key</button>';
     } else if (ai.reason === 'missing_ai_api_key' || ai.reason === 'managed_key_unavailable') {
-      html += '<p class="text-sm text-muted">Add an AI provider in Settings for an AI-written forecast outlook.</p>' +
+      html += '<p class="text-sm text-muted">Add an AI provider in Settings to get the AI Advisor’s interpretation of this forecast.</p>' +
         '<button type="button" class="btn-secondary btn-small" style="margin-top:0.6rem;" onclick="navigate(\'settings\')">' + icon('settings') + ' AI settings</button>';
     } else {
-      html += '<p class="text-sm text-muted">' + escapeHtml(AI_FAILURE_MESSAGES[ai.reason] || 'AI advisory unavailable — the forecast numbers above are still valid.') + '</p>';
+      html += '<p class="text-sm text-muted">' + escapeHtml(AI_FAILURE_MESSAGES[ai.reason] || 'The AI Advisor is unavailable right now — your Cash Flow Forecast above is still valid.') + '</p>';
     }
     html += '</div>';
     html += '<div class="glass-card"><div class="card-title">How this is computed</div>' +
-      '<p class="text-sm text-muted">Projects your current cash forward at this month’s net cash-flow run-rate. Numbers come from the <span class="mono">cashflow-forecaster</span> skill — the AI only explains them, never invents them.</p></div>';
+      '<p class="text-sm text-muted">Your <strong>Cash Flow Forecast</strong> projects current cash forward at this month’s net run-rate — computed by the <span class="mono">cashflow-forecaster</span> skill, free on every plan. The <strong>AI Cash Flow Advisor</strong> only interprets those numbers; it never calculates or changes them.</p></div>';
     html += '</div></div>'; /* /dash-rail /dash-grid */
 
+    html += whatIfCardHtml();
+
     $pageContent.innerHTML = html;
+    if (planAllows('what_if_simulator')) onWhatIfScenarioChange(); /* populate scenario inputs */
     loadEntitlement(); /* AI advisory may have spent credits */
   }).catch(function() {
     $pageContent.innerHTML = renderEmptyState('x-circle', 'Forecast failed', 'Could not compute the forecast. Try again.');
   });
+}
+
+/* ── What-If Simulator (Forecast → What If → Adjust → Run → Results) ──
+   Client mirror of the server SCENARIOS catalogue so the form fields always
+   match what /api/what-if understands. */
+var WHATIF_SCENARIOS = {
+  increase_payroll: { label: 'Increase payroll', hint: 'Add a recurring monthly staff cost.',
+    inputs: [{ key: 'amount', label: 'Extra monthly payroll', type: 'money', default: 50000 }] },
+  reduce_revenue: { label: 'Reduce revenue', hint: 'Model a drop in monthly sales.',
+    inputs: [{ key: 'percent', label: 'Revenue drop (%)', type: 'percent', default: 20 }] },
+  hire_employees: { label: 'Hire employees', hint: 'Add headcount at an average monthly salary.',
+    inputs: [{ key: 'count', label: 'New hires', type: 'number', default: 2 },
+             { key: 'salary', label: 'Avg monthly salary each', type: 'money', default: 60000 }] },
+  increase_rent: { label: 'Increase rent', hint: 'A higher recurring monthly rent.',
+    inputs: [{ key: 'amount', label: 'Extra monthly rent', type: 'money', default: 30000 }] },
+  large_purchase: { label: 'Large purchase', hint: 'A one-time cash outlay (equipment, inventory).',
+    inputs: [{ key: 'amount', label: 'Purchase amount', type: 'money', default: 200000 }] },
+  loan_repayment: { label: 'Loan repayment', hint: 'A recurring monthly loan repayment.',
+    inputs: [{ key: 'amount', label: 'Monthly repayment', type: 'money', default: 40000 },
+             { key: 'months', label: 'Term (months)', type: 'number', default: 12 }] },
+  custom: { label: 'Custom scenario', hint: 'Any change: a monthly net effect and/or a one-time cash change.',
+    inputs: [{ key: 'label', label: 'Scenario name', type: 'text', default: '' },
+             { key: 'monthlyNetDelta', label: 'Monthly net change (+/-)', type: 'signed-money', default: 0 },
+             { key: 'oneTimeCashDelta', label: 'One-time cash change (+/-)', type: 'signed-money', default: 0 }] }
+};
+var WHATIF_ORDER = ['increase_payroll', 'reduce_revenue', 'hire_employees', 'increase_rent', 'large_purchase', 'loan_repayment', 'custom'];
+
+function whatIfCardHtml() {
+  /* Decision simulation is strategic planning, not monitoring -- a Growth
+     capability. Shown locked (not hidden) so it is discoverable. */
+  if (!planAllows('what_if_simulator')) {
+    return lockedFeatureCard(
+      'what_if_simulator',
+      'What-If Simulator',
+      'Test a decision before you make it and see the impact on cash, runway and health.'
+    );
+  }
+  var opts = WHATIF_ORDER.map(function(k) {
+    return '<option value="' + k + '">' + escapeHtml(WHATIF_SCENARIOS[k].label) + '</option>';
+  }).join('');
+  return '<div class="glass-card whatif-card">' +
+    '<div class="card-head"><div>' +
+      '<div class="chart-title">' + icon('sliders') + ' What-If Simulator</div>' +
+      '<div class="chart-sub">Model a decision before you make it, then get an AI recommendation.</div>' +
+    '</div></div>' +
+    '<div class="whatif-controls">' +
+      '<div class="whatif-field"><label class="whatif-label">Scenario</label>' +
+        '<select id="whatif-scenario" class="whatif-input" onchange="onWhatIfScenarioChange()">' + opts + '</select></div>' +
+      '<div id="whatif-inputs" class="whatif-inputs"></div>' +
+      '<button type="button" class="btn-primary" id="whatif-run" onclick="runWhatIfSimulation()">' + icon('play') + ' Run Simulation</button>' +
+    '</div>' +
+    '<div id="whatif-results"></div>' +
+  '</div>';
+}
+
+function onWhatIfScenarioChange() {
+  var sel = document.getElementById('whatif-scenario');
+  var box = document.getElementById('whatif-inputs');
+  if (!sel || !box) return;
+  var scn = WHATIF_SCENARIOS[sel.value];
+  if (!scn) { box.innerHTML = ''; return; }
+  var html = '';
+  scn.inputs.forEach(function(inp) {
+    var isNum = inp.type !== 'text';
+    var placeholder = inp.type === 'percent' ? '%' : (inp.type === 'text' ? 'e.g. New warehouse lease' : '');
+    html += '<div class="whatif-field">' +
+      '<label class="whatif-label">' + escapeHtml(inp.label) + '</label>' +
+      '<input id="wf-' + inp.key + '" class="whatif-input" ' +
+        (isNum ? 'type="number" inputmode="numeric" ' : 'type="text" ') +
+        'value="' + escapeHtml(String(inp.default)) + '" placeholder="' + escapeHtml(placeholder) + '"></div>';
+  });
+  html += '<div class="whatif-hint">' + icon('info') + ' ' + escapeHtml(scn.hint) + '</div>';
+  box.innerHTML = html;
+}
+
+function runWhatIfSimulation() {
+  var sel = document.getElementById('whatif-scenario');
+  var btn = document.getElementById('whatif-run');
+  var out = document.getElementById('whatif-results');
+  if (!sel || !out) return;
+  var type = sel.value;
+  var scn = WHATIF_SCENARIOS[type];
+  var params = {};
+  scn.inputs.forEach(function(inp) {
+    var el = document.getElementById('wf-' + inp.key);
+    if (!el) return;
+    params[inp.key] = inp.type === 'text' ? el.value : Number(el.value || 0);
+  });
+
+  if (btn) { btn.disabled = true; btn.innerHTML = icon('clock') + ' Simulating…'; }
+  out.innerHTML = '<div class="whatif-loading">' + icon('clock') + ' Running scenario…</div>';
+
+  fetch('/api/what-if', {
+    method: 'POST', headers: mutatingHeaders(),
+    body: JSON.stringify({ month: appState.activeMonth || null, type: type, params: params })
+  }).then(function(r) { return r.json(); }).then(function(data) {
+    if (btn) { btn.disabled = false; btn.innerHTML = icon('play') + ' Run Simulation'; }
+    if (!data || !data.ok) {
+      if (data && data.error === 'upgrade_required') {
+        loadEntitlement().then(function() { renderTabbedPage('analytics'); });
+        showUpgradeModal(data.message || 'The What-If Simulator is available on the Growth and Custom AI plans.');
+        return;
+      }
+      out.innerHTML = '<div class="whatif-loading text-red">' + icon('x-circle') + ' ' +
+        escapeHtml(data && data.error === 'unknown_scenario' ? 'Unknown scenario.' : 'Simulation failed. Run a monthly review first.') + '</div>';
+      return;
+    }
+    renderWhatIfResults(data);
+    loadEntitlement(); /* AI recommendation may have spent credits */
+  }).catch(function() {
+    if (btn) { btn.disabled = false; btn.innerHTML = icon('play') + ' Run Simulation'; }
+    out.innerHTML = '<div class="whatif-loading text-red">' + icon('x-circle') + ' Connection error during simulation.</div>';
+  });
+}
+
+function whatIfDelta(before, after, format) {
+  var fmt = function(v) {
+    if (v == null) return format === 'days' ? 'No depletion' : '—';
+    if (format === 'money') return formatCurrency(v);
+    if (format === 'days') return v + ' days';
+    if (format === 'score') return v + '/100';
+    return escapeHtml(String(v));
+  };
+  return { before: fmt(before), after: fmt(after) };
+}
+
+function renderWhatIfResults(data) {
+  var out = document.getElementById('whatif-results');
+  if (!out) return;
+  var r = data.result;
+  var arrow = ' <span class="whatif-arrow">' + icon('arrow-right') + '</span> ';
+
+  var html = '<div class="whatif-results-inner">';
+  html += '<div class="whatif-scenario-line">' + icon('sliders') + ' <strong>' + escapeHtml(r.scenario.label) + '</strong> — ' + escapeHtml(r.scenario.summary) + '</div>';
+
+  /* Headline before → after tiles */
+  html += '<div class="whatif-compare">';
+  r.risk_changes.forEach(function(c) {
+    var d = whatIfDelta(c.before, c.after, c.format);
+    var cls = c.direction === 'better' ? 'text-emerald' : c.direction === 'worse' ? 'text-red' : 'text-muted';
+    var dirIcon = c.direction === 'better' ? 'trending-up' : c.direction === 'worse' ? 'trending-down' : 'minus';
+    html += '<div class="whatif-metric">' +
+      '<div class="whatif-metric-label">' + escapeHtml(c.label) + '</div>' +
+      '<div class="whatif-metric-values"><span class="whatif-before">' + d.before + '</span>' + arrow +
+        '<span class="whatif-after ' + cls + '">' + d.after + '</span></div>' +
+      '<div class="whatif-metric-dir ' + cls + '">' + icon(dirIcon) + ' ' +
+        (c.direction === 'better' ? 'Improves' : c.direction === 'worse' ? 'Worsens' : 'No change') + '</div>' +
+    '</div>';
+  });
+  html += '</div>';
+
+  /* Adjusted run-rate summary */
+  html += '<div class="whatif-runrate">' +
+    '<span>Cash on hand: <strong>' + formatCurrency(r.baseline.starting_cash) + '</strong>' + arrow + '<strong class="' + (r.adjusted.starting_cash >= r.baseline.starting_cash ? 'text-emerald' : 'text-red') + '">' + formatCurrency(r.adjusted.starting_cash) + '</strong></span>' +
+    '<span>Monthly net: <strong>' + formatCurrency(r.baseline.monthly_net) + '</strong>' + arrow + '<strong class="' + (r.adjusted.monthly_net >= r.baseline.monthly_net ? 'text-emerald' : 'text-red') + '">' + formatCurrency(r.adjusted.monthly_net) + '</strong></span>' +
+  '</div>';
+
+  /* AI recommendation */
+  var ai = data.ai || {};
+  html += '<div class="whatif-ai">';
+  html += '<div class="card-title">' + icon('bot') + ' AI Recommendation</div>';
+  if (ai.ok && ai.text) {
+    html += '<p class="text-sm" style="line-height:1.7;white-space:pre-wrap;">' + escapeHtml(ai.text) + '</p>';
+  } else if (ai.reason === 'upgrade_required') {
+    html += '<p class="text-sm text-muted">' + escapeHtml(ai.message || 'The AI recommendation is available on Growth or Custom AI. The simulation numbers above are free.') + '</p>' +
+      '<button type="button" class="btn-primary btn-small" style="margin-top:0.6rem;" onclick="showUpgradeModal(\'Unlock AI recommendations for what-if scenarios on the Growth or Custom AI plans.\')">' + icon('bot') + ' Unlock AI recommendation</button>';
+  } else if (ai.reason === 'insufficient_credits') {
+    html += '<p class="text-sm text-muted">You’re out of AI credits this month. The simulation numbers are free — upgrade or add your own API key for the AI recommendation.</p>' +
+      '<button type="button" class="btn-primary btn-small" style="margin-top:0.6rem;" onclick="navigate(\'settings\')">Upgrade / add key</button>';
+  } else if (ai.reason === 'missing_ai_api_key' || ai.reason === 'managed_key_unavailable') {
+    html += '<p class="text-sm text-muted">Add an AI provider in Settings for an AI-written recommendation.</p>' +
+      '<button type="button" class="btn-secondary btn-small" style="margin-top:0.6rem;" onclick="navigate(\'settings\')">' + icon('settings') + ' AI settings</button>';
+  } else {
+    html += '<p class="text-sm text-muted">' + escapeHtml(AI_FAILURE_MESSAGES[ai.reason] || 'AI recommendation unavailable — the simulation numbers above are still valid.') + '</p>';
+  }
+  html += '</div>';
+
+  html += '</div>';
+  out.innerHTML = html;
 }
 
 /* ── Revenue Intelligence ────────────────────────────────────── */
@@ -1677,7 +3265,7 @@ function renderRevenueIntelligence() {
     html += '<div class="card-title">Revenue Summary</div>';
     html += '<div class="kpi-row">';
     html += '<div class="kpi-card"><div class="kpi-label">Total Revenue</div><div class="kpi-value">' + formatCurrency(total) + '</div></div>';
-    html += '<div class="kpi-card"><div class="kpi-label">Growth Rate</div><div class="kpi-value ' + (growth >= 0 ? 'text-emerald' : 'text-red') + '">' + (growth != null ? formatPercent(growth) : '—') + '</div></div>';
+    html += '<div class="kpi-card"><div class="kpi-label">Growth Rate</div><div class="kpi-value ' + (!isMeasured(growth) ? 'text-muted' : growth >= 0 ? 'text-emerald' : 'text-red') + '">' + (growth != null ? formatPercent(growth) : '—') + '</div></div>';
     html += '<div class="kpi-card"><div class="kpi-label">Direction</div><div class="kpi-value">' + escapeHtml(direction) + '</div></div>';
     html += '<div class="kpi-card"><div class="kpi-label">Active Customers</div><div class="kpi-value">' + activeCustomers + '</div></div>';
     html += '</div></div>';
@@ -1743,12 +3331,20 @@ function renderRiskAnomalies() {
     /* Data table */
     if (items.length > 0) {
       html += '<div class="glass-card">';
-      html += '<table class="data-table"><thead><tr><th>Type</th><th>Severity</th><th>Description</th></tr></thead><tbody>';
+      html += '<table class="data-table"><thead><tr><th>Type</th><th>Severity</th><th>Description</th><th></th></tr></thead><tbody>';
       items.forEach(function(item) {
+        var key = item.finding_id || item.id || '';
         html += '<tr>';
         html += '<td>' + escapeHtml(item.type || item.category || '—') + '</td>';
         html += '<td><span class="' + severityClass(item.severity) + '">' + escapeHtml(item.severity || '—') + '</span></td>';
         html += '<td>' + escapeHtml(item.description || item.text || item.message || '—') + '</td>';
+        /* INVESTIGATE. A finding says "these two payments are duplicates"; the
+           user's next question is always "which two?". The backend has been
+           able to answer that since JOB 12 and nothing asked it. */
+        html += '<td>' + (key
+          ? '<button type="button" class="btn-secondary btn-small" data-fg-action="investigate"'
+            + ' data-finding="' + escapeHtml(key) + '">Investigate</button>'
+          : '') + '</td>';
         html += '</tr>';
       });
       html += '</tbody></table></div>';
@@ -1773,7 +3369,12 @@ function renderVendors() {
     }
 
     var v = data.vendors || data.data || data;
-    var riskScore = v.vendor_risk_score || v.risk_score || '—';
+    // JOB 7: `'—' >= 70` and `'—' >= 40` are both false, so an UNMEASURABLE
+    // score fell through to text-red — the client inventing a critical reading
+    // out of "we could not attribute these transactions".
+    var riskRaw = (v.vendor_risk_score != null) ? v.vendor_risk_score : v.risk_score;
+    var riskKnown = v.available !== false && isMeasured(riskRaw);
+    var riskScore = riskKnown ? riskRaw : UNMEASURED;
     var concentrationObj = (v.concentration && typeof v.concentration === 'object') ? v.concentration : {};
     var concentrationPct = concentrationObj.top_3_percentage != null ? concentrationObj.top_3_percentage
       : (typeof v.top_vendor_concentration === 'number' ? v.top_vendor_concentration
@@ -1786,7 +3387,13 @@ function renderVendors() {
 
     /* Summary */
     html += '<div class="kpi-row">';
-    html += '<div class="kpi-card"><div class="kpi-label">Vendor Risk Score</div><div class="kpi-value ' + (riskScore >= 70 ? 'text-emerald' : riskScore >= 40 ? 'text-amber' : 'text-red') + '">' + riskScore + '<span class="text-muted text-sm">/100</span></div></div>';
+    html += '<div class="kpi-card"><div class="kpi-label">Vendor Risk Score</div><div class="kpi-value ' + (!riskKnown ? 'text-muted' : categoryClass(scoreCategory(riskScore))) + '">' + riskScore + (riskKnown ? '<span class="text-muted text-sm">/100</span>' : '')  + '</div></div>';
+    /* `unavailableNotice(c, 'Customer concentration')` used to sit here — a
+       copy-paste from renderCustomers that referenced an undefined `c` AND
+       named the wrong metric. It threw `ReferenceError: c is not defined` on
+       every render, so the Vendors page was blank for every user, on every
+       period, while /api/vendors returned complete data. */
+    html += unavailableNotice(v, 'Vendor concentration');
     html += '<div class="kpi-card"><div class="kpi-label">Top 3 Concentration</div><div class="kpi-value">' + (concentrationPct != null ? formatPercent(concentrationPct) : '—') + '</div></div>';
     html += '<div class="kpi-card"><div class="kpi-label">Top Vendor</div><div class="kpi-value text-sm" style="font-size:1.1rem">' + escapeHtml(typeof topVendor === 'object' ? (topVendor.name || '—') : topVendor) + '</div></div>';
     html += '<div class="kpi-card"><div class="kpi-label">Vendor Count</div><div class="kpi-value">' + vendors.length + '</div></div>';
@@ -1828,7 +3435,12 @@ function renderCustomers() {
     }
 
     var c = data.customers || data.data || data;
-    var riskScore = c.customer_risk_score || c.risk_score || '—';
+    // JOB 7: `'—' >= 70` and `'—' >= 40` are both false, so an UNMEASURABLE
+    // score fell through to text-red — the client inventing a critical reading
+    // out of "we could not attribute these transactions".
+    var riskRaw = (c.customer_risk_score != null) ? c.customer_risk_score : c.risk_score;
+    var riskKnown = c.available !== false && isMeasured(riskRaw);
+    var riskScore = riskKnown ? riskRaw : UNMEASURED;
     var concentrationObj = (c.concentration && typeof c.concentration === 'object') ? c.concentration : {};
     var concentrationPct = concentrationObj.top_3_percentage != null ? concentrationObj.top_3_percentage
       : (typeof c.top_customer_concentration === 'number' ? c.top_customer_concentration
@@ -1841,7 +3453,7 @@ function renderCustomers() {
 
     /* Summary */
     html += '<div class="kpi-row">';
-    html += '<div class="kpi-card"><div class="kpi-label">Customer Risk Score</div><div class="kpi-value ' + (riskScore >= 70 ? 'text-emerald' : riskScore >= 40 ? 'text-amber' : 'text-red') + '">' + riskScore + '<span class="text-muted text-sm">/100</span></div></div>';
+    html += '<div class="kpi-card"><div class="kpi-label">Customer Risk Score</div><div class="kpi-value ' + (!riskKnown ? 'text-muted' : categoryClass(scoreCategory(riskScore))) + '">' + riskScore + (riskKnown ? '<span class="text-muted text-sm">/100</span>' : '')  + '</div></div>';
     html += '<div class="kpi-card"><div class="kpi-label">Top 3 Concentration</div><div class="kpi-value">' + (concentrationPct != null ? formatPercent(concentrationPct) : '—') + '</div></div>';
     html += '<div class="kpi-card"><div class="kpi-label">Top Customer</div><div class="kpi-value text-sm" style="font-size:1.1rem">' + escapeHtml(typeof topCustomer === 'object' ? (topCustomer.name || '—') : topCustomer) + '</div></div>';
     html += '<div class="kpi-card"><div class="kpi-label">Customer Count</div><div class="kpi-value">' + customers.length + '</div></div>';
@@ -1928,7 +3540,7 @@ function generateActionPlan() {
   var out = document.getElementById('action-plan-result');
   if (out) out.innerHTML = '<div class="glass-card"><div class="card-title">' + icon('bot') + ' AI Action Plan</div>' + renderLoadingShimmer(2) + '</div>';
   fetch('/api/action-plan', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ month: appState.activeMonth || null })
+    method: 'POST', headers: mutatingHeaders(), body: JSON.stringify({ month: appState.activeMonth || null })
   }).then(function(r) { return r.json(); }).then(function(data) {
     if (!out) return;
     var ai = (data && data.ai) || {};
@@ -1966,14 +3578,40 @@ function exportActions(format) {
       var blob = new Blob([JSON.stringify(actions, null, 2)], { type: 'application/json' });
       downloadBlob(blob, 'actions.json');
     } else {
-      var csv = 'Priority,Task,Owner,Due,Status\n';
+      /* CSV CANNOT CARRY A NOTICE BLOCK, so the limitation becomes an explicit
+         COLUMN rather than being silently dropped. A downloaded file is read
+         with no app around it: if the analysis behind these actions rested on
+         estimated or unmeasured inputs, the file has to say so itself.
+
+         The actions carry no measured financial figures, so nothing here can
+         misstate an amount -- what is at stake is the COMPLETENESS of the list,
+         which is exactly what this column records. */
+      var limitations = (data.disclosure && data.disclosure.limitations) || [];
+      var analysisNote = limitations.length
+        ? 'Analysis incomplete: ' + limitations.map(function (l) {
+          return l.detail || l.metric || l.input || 'unspecified limitation';
+        }).join(' | ')
+        : 'Analysis complete';
+
+      function csvCell(v) {
+        return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+      }
+
+      var csv = 'Priority,Task,Owner,Due,Status,Analysis status\n';
       actions.forEach(function(a) {
-        csv += '"' + (a.priority || '') + '","' + (a.task || a.description || '') + '","' + (a.owner || '') + '","' + (a.due || a.due_date || '') + '","' + (a.status || '') + '"\n';
+        csv += [
+          csvCell(a.priority), csvCell(a.task || a.description), csvCell(a.owner),
+          csvCell(a.due || a.due_date), csvCell(a.status), csvCell(analysisNote)
+        ].join(',') + '\n';
       });
       var blob = new Blob([csv], { type: 'text/csv' });
       downloadBlob(blob, 'actions.csv');
     }
-    showToast('Export downloaded!', 'success');
+    if (data.disclosure && (data.disclosure.limitations || []).length) {
+      showToast('Export downloaded \u2014 it notes the analysis limitations.', 'warning');
+    } else {
+      showToast('Export downloaded!', 'success');
+    }
   });
 }
 
@@ -2025,15 +3663,27 @@ async function generateReport(reportType) {
   try {
     var res = await fetch('/api/executive-report', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: mutatingHeaders(),
       body: JSON.stringify({ report_type: reportType })
     });
     var data = await res.json();
 
     if (data.ok) {
       var content = data.report || data.content || data.text || JSON.stringify(data.data, null, 2);
-      resultEl.innerHTML = '<div class="report-result">' + escapeHtml(content) + '</div>';
-      showToast('Report generated successfully!', 'success');
+      /* A REPORT WITH LIMITATIONS IS NOT AN UNQUALIFIED SUCCESS.
+         The limitations are already written into the report TEXT server-side,
+         so they travel with anything exported or forwarded. What was missing
+         here was the signal at the moment of generation: "generated
+         successfully" told the user the document was complete when the server
+         had said `complete: false`. The structured block is rendered above the
+         text as well, using the same helper as every other page. */
+      resultEl.innerHTML = renderDisclosure(data.disclosure)
+        + '<div class="report-result">' + escapeHtml(content) + '</div>';
+      if (data.complete === false) {
+        showToast('Report generated — see the limitations noted on it.', 'warning');
+      } else {
+        showToast('Report generated successfully!', 'success');
+      }
     } else {
       resultEl.innerHTML = '<p class="text-red text-sm" style="margin-top:1rem;">Failed: ' + escapeHtml(data.error || 'Unknown error') + '</p>';
     }
@@ -2044,15 +3694,11 @@ async function generateReport(reportType) {
 
 /* Download the branded PDF (gated: Free → upgrade modal; Pro → 20 credits; BYOK → free) */
 function downloadExecutiveReportPdf(reportType) {
-  var e = appState.entitlement;
-  // Snappy client-side pre-check (the server still enforces this).
-  if (e && !e.byok && e.plan === 'free') {
-    showUpgradeModal('PDF reports are available on the Professional or Custom AI plans.');
-    return;
-  }
+  /* Reports are available on every plan -- rendering a document from already
+     computed numbers is deterministic work, not intelligence. */
   showToast('Preparing your PDF…', 'info');
   fetch('/api/executive-report/pdf', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ report_type: reportType })
+    method: 'POST', headers: mutatingHeaders(), body: JSON.stringify({ report_type: reportType })
   }).then(function(res) {
     var ct = res.headers.get('content-type') || '';
     if (res.ok && ct.indexOf('application/pdf') !== -1) {
@@ -2070,12 +3716,80 @@ function downloadExecutiveReportPdf(reportType) {
       });
     }
     return res.json().then(function(d) {
-      if (d.error === 'upgrade_required') showUpgradeModal(d.message || 'PDF reports are available on the Professional or Custom AI plans.');
-      else if (d.error === 'insufficient_credits') showUpgradeModal('You’ve used your AI credits this month. Upgrade to Professional or add your own API key to keep downloading PDF reports.');
-      else if (d.error === 'no_report') showToast('Run a monthly review first, then download.', 'warning');
+      if (d.error === 'no_report') showToast('Run a monthly review first, then download.', 'warning');
       else showToast('Could not generate the PDF: ' + (d.message || d.error || 'error'), 'error');
     });
   }).catch(function() { showToast('Could not download the PDF. Try again.', 'error'); });
+}
+
+
+/** Every upgrade path lands here — one destination, one checkout. */
+function openPlansAndBilling() {
+  navigate('settings');
+  switchSettingsSection('plan');
+}
+
+/**
+ * RENEWAL BANNER.
+ *
+ * M-Pesa has no merchant-initiated auto-debit, so a paid period genuinely ends
+ * and the customer has to renew. `renewal` is computed server-side from the
+ * authoritative expiry — the client does no date arithmetic of its own on a
+ * value it was handed.
+ *
+ * The expired copy leads with what is NOT lost. "Your plan expired" reads to an
+ * SME owner as "my books are gone", and that fear is worth one explicit
+ * sentence to prevent.
+ */
+
+/** A plan key -> its label, from the catalog the server sent. */
+function featurePlanLabel(planKey) {
+  var opts = (appState.account && appState.account.upgrade_options) || [];
+  for (var i = 0; i < opts.length; i++) {
+    if (opts[i].key === planKey) return opts[i].label;
+  }
+  // Not in the upgrade list because it IS the current plan.
+  if (appState.account && appState.account.plan === planKey) {
+    return appState.account.plan_label;
+  }
+  return null;
+}
+
+function renderRenewalBanner() {
+  var r = appState.account && appState.account.renewal;
+  if (!r || r.state === 'none' || r.state === 'active') return '';
+
+  /* THE PLAN THAT LAPSED, not the plan they are on now. After expiry the
+     current plan is Starter, so `plan_label` would render "Renew Starter" —
+     asking the user to buy the free tier. `renewal.plan` carries what actually
+     expired. */
+  var lapsed = r.plan && featurePlanLabel(r.plan);
+  var planLabel = lapsed
+    || (appState.account && appState.account.plan_label)
+    || 'your plan';
+
+  if (r.state === 'expired') {
+    return '<div class="callout-warning renewal-expired">'
+      + '<div class="callout-warning-icon">' + icon('alert-triangle') + '</div>'
+      + '<div class="callout-warning-text">'
+      + '<strong>Your plan has expired.</strong> '
+      + 'Your financial data and historical analyses are still here — nothing has '
+      + 'been deleted. Paid features are locked until you renew.'
+      + '<div style="margin-top:0.6rem;"><button type="button" class="btn-primary btn-small" '
+      + 'onclick="openPlansAndBilling()">Renew ' + escapeHtml(planLabel) + '</button></div>'
+      + '</div></div>';
+  }
+
+  var d = r.days_remaining;
+  var when = d <= 1 ? 'tomorrow' : ('in ' + d + ' days');
+  return '<div class="callout-warning renewal-soon">'
+    + '<div class="callout-warning-icon">' + icon('clock') + '</div>'
+    + '<div class="callout-warning-text">'
+    + 'Your ' + escapeHtml(planLabel) + ' plan expires ' + escapeHtml(when) + '. '
+    + 'Renew to keep forecasting, what-if analysis and advanced AI features.'
+    + '<div style="margin-top:0.6rem;"><button type="button" class="btn-primary btn-small" '
+    + 'onclick="openPlansAndBilling()">Renew now</button></div>'
+    + '</div></div>';
 }
 
 function showUpgradeModal(message) {
@@ -2085,10 +3799,14 @@ function showUpgradeModal(message) {
   wrap.className = 'modal-overlay';
   wrap.innerHTML = '<div class="modal-card glass-card">' +
     '<div class="modal-icon">' + icon('bot', { cls: 'icon-xl' }) + '</div>' +
-    '<h2>Unlock PDF reports</h2>' +
+    '<h2>Unlock more with Growth</h2>' +
     '<p class="text-sm text-muted">' + escapeHtml(message) + '</p>' +
     '<div class="modal-actions">' +
-      '<button type="button" class="btn-primary btn-full" onclick="closeUpgradeModal();setPlan(\'pro\')">Upgrade to Professional</button>' +
+      /* WAS `setPlan('growth')` — a direct call to the test-only grant
+         endpoint, which is refused outside NODE_ENV=test. In production this
+         button showed "Could not change plan". An upgrade now goes where an
+         upgrade actually happens: Plans & Billing, and a real checkout. */
+      '<button type="button" class="btn-primary btn-full" onclick="closeUpgradeModal();openPlansAndBilling()">See plans &amp; upgrade</button>' +
       '<button type="button" class="btn-secondary btn-full" onclick="closeUpgradeModal();navigate(\'settings\')">Add my own API key</button>' +
       '<button type="button" class="btn-ghost" onclick="closeUpgradeModal()">Maybe later</button>' +
     '</div></div>';
@@ -2127,7 +3845,13 @@ function renderAIController() {
   /* Chat feed */
   html += '<div class="chat-feed-full" id="chat-feed">';
   if (appState.chatHistory.length === 0) {
-    html += '<div class="empty-state" style="flex:1"><div class="empty-state-icon">' + icon('bot', { cls: 'icon-xl' }) + '</div><div class="empty-state-title">FinGuard AI</div><div class="empty-state-text">Ask me anything about your finances. I have full context from your latest analysis.</div></div>';
+    /* Finna greets an empty conversation, idling. She is the same single
+       instance that will later follow the answers down the page. */
+    html += '<div class="empty-state" style="flex:1">'
+      + '<div class="empty-state-icon finna-slot finna-slot-lg"></div>'
+      + '<div class="empty-state-title">Finna</div>'
+      + '<div class="empty-state-text">Ask me anything about your finances. '
+      + 'I have full context from your latest analysis.</div></div>';
   } else {
     appState.chatHistory.forEach(function(msg) {
       html += renderChatMessage(msg.role, msg.content);
@@ -2148,14 +3872,98 @@ function renderAIController() {
   /* Scroll to bottom */
   var feed = document.getElementById('chat-feed');
   if (feed) feed.scrollTop = feed.scrollHeight;
+
+  /* Put Finna in the newest assistant slot: the greeting on an empty
+     conversation, otherwise beside the last thing she said. */
+  if (window.Finna) {
+    var slots = document.querySelectorAll('.finna-slot');
+    if (slots.length) {
+      Finna.mount(slots[slots.length - 1], { size: slots.length === 1 ? 96 : 44 });
+      Finna.setState('idle');
+    }
+  }
+}
+
+/* Render a safe subset of Markdown so AI answers show as formatted text
+   (bold, headings, bullets) instead of raw asterisks and hashes. HTML is
+   escaped FIRST, so nothing the model emits can inject markup. */
+function inlineMd(s) {
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+  s = s.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+  return s;
+}
+function mdLiteToHtml(raw) {
+  var lines = escapeHtml(String(raw || '')).split(/\r?\n/);
+  var html = '';
+  var inList = false;
+  var closeList = function() { if (inList) { html += '</ul>'; inList = false; } };
+  lines.forEach(function(line) {
+    var t = line.trim();
+    if (!t) { closeList(); return; }
+    var h = t.match(/^(#{1,6})\s+(.*)$/);
+    if (h) { closeList(); html += '<div class="chat-h chat-h' + Math.min(h[1].length, 4) + '">' + inlineMd(h[2].replace(/:\s*$/, '')) + '</div>'; return; }
+    var li = t.match(/^([-*]|\d+\.)\s+(.*)$/);
+    if (li) { if (!inList) { html += '<ul class="chat-ul">'; inList = true; } html += '<li>' + inlineMd(li[2]) + '</li>'; return; }
+    closeList();
+    html += '<div class="chat-p">' + inlineMd(t) + '</div>';
+  });
+  closeList();
+  return html;
+}
+
+/* ── Finna, the copilot's face ─────────────────────────────────────
+   She is a single instance that re-anchors to the newest assistant message, so
+   she appears to follow the conversation down the page rather than being
+   duplicated on every bubble.
+
+   EVERY STATE COMES FROM A REAL EVENT. `thinking` while the request is in
+   flight, `speaking` while an answer is being placed on the page, `error` when
+   one did not arrive. Nothing here is on a timer that guesses at progress. */
+
+/** Move Finna into a message's slot and set her state. Safe if she is absent. */
+function mountFinnaOn(messageEl, state) {
+  if (!window.Finna || !messageEl) return null;
+  var slot = messageEl.querySelector('.finna-slot');
+  if (!slot) return null;
+  var f = Finna.mount(slot);
+  if (f && state) f.setState(state);
+  return f;
+}
+
+/**
+ * Talk for as long as there is plausibly something to read, then settle.
+ *
+ * Scaled to the length of the answer rather than a fixed beat, and clamped so a
+ * one-line reply does not get a five-second performance and a long one does not
+ * mumble on forever.
+ */
+function finnaSpeak(messageEl, text) {
+  var f = mountFinnaOn(messageEl, 'speaking');
+  if (!f) return;
+  var words = String(text || '').split(/\s+/).filter(Boolean).length;
+  var ms = Math.max(900, Math.min(4200, words * 90));
+  window.setTimeout(function () {
+    // Only settle if she is still the one on screen and still talking.
+    if (Finna.state === 'speaking') Finna.setState('happy');
+    window.setTimeout(function () {
+      if (Finna.state === 'happy') Finna.setState('idle');
+    }, 1200);
+  }, ms);
 }
 
 function renderChatMessage(role, content) {
   var isUser = role === 'user';
-  var avatarIcon = icon(isUser ? 'user' : 'bot');
+  var body = isUser ? escapeHtml(content).replace(/\n/g, '<br>') : mdLiteToHtml(content);
+  /* An assistant row carries an empty SLOT rather than a static icon, so the
+     one live Finna can move into it. The user's own row keeps its icon. */
+  var avatar = isUser
+    ? '<div class="chat-msg-avatar">' + icon('user') + '</div>'
+    : '<div class="chat-msg-avatar finna-slot"></div>';
   return '<div class="chat-msg ' + (isUser ? 'user' : 'ai') + '">' +
-    '<div class="chat-msg-avatar">' + avatarIcon + '</div>' +
-    '<div class="chat-msg-bubble">' + escapeHtml(content) + '</div>' +
+    avatar +
+    '<div class="chat-msg-bubble">' + body + '</div>' +
   '</div>';
 }
 
@@ -2168,6 +3976,15 @@ function sendChatFromChip(btn) {
   }
 }
 
+/**
+ * THE FINANCIAL COPILOT.
+ *
+ * Distinct from a chat bubble in the way that matters: an answer is not one
+ * block of text. It is a structured response separating what the engine
+ * DETECTED from what the model INTERPRETED and what it RECOMMENDS — and the UI
+ * shows that distinction, because presenting all three in the same voice is how
+ * an interpretation gets mistaken for a finding.
+ */
 async function sendChat() {
   var input = document.getElementById('chat-input');
   var feed = document.getElementById('chat-feed');
@@ -2176,94 +3993,226 @@ async function sendChat() {
   var message = input.value.trim();
   if (!message) return;
 
-  /* Clear empty state */
   var emptyState = feed.querySelector('.empty-state');
   if (emptyState) emptyState.remove();
 
-  /* Add user message */
   appState.chatHistory.push({ role: 'user', content: message });
   feed.insertAdjacentHTML('beforeend', renderChatMessage('user', message));
   input.value = '';
   feed.scrollTop = feed.scrollHeight;
 
-  /* Show typing indicator */
+  /* FINNA THINKS WHILE THE REQUEST IS IN FLIGHT. The state is driven by what
+     the fetch is actually doing, never by a timer — she must not look like she
+     is answering before an answer exists. */
   var typingId = 'typing-' + Date.now();
-  feed.insertAdjacentHTML('beforeend', '<div id="' + typingId + '" class="chat-msg ai"><div class="chat-msg-avatar">' + icon('bot') + '</div><div class="chat-msg-bubble" style="animation:pulse 1s infinite">Thinking…</div></div>');
+  feed.insertAdjacentHTML('beforeend',
+    '<div id="' + typingId + '" class="chat-msg ai">'
+    + '<div class="chat-msg-avatar finna-slot"></div>'
+    + '<div class="chat-msg-bubble" style="animation:pulse 1s infinite">'
+    + 'Checking your analysis&hellip;</div></div>');
+  mountFinnaOn(document.getElementById(typingId), 'thinking');
   feed.scrollTop = feed.scrollHeight;
 
   try {
-    var res = await fetch('/api/chat', {
+    var res = await fetch('/api/copilot', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: mutatingHeaders(),
       body: JSON.stringify({
         message: message,
-        history: appState.chatHistory.slice(-10),
-        ai_provider: appState.aiProvider,
+        month: appState.activeMonth || null,
+        /* The conversation id lets a follow-up resolve "this" and "that"
+           server-side, where the entity references actually live. */
+        conversation_id: appState.copilotConversationId || null,
+        finding_id: appState.copilotFindingId || null,
         ai_assistant: appState.aiAssistant
       })
     });
     var data = await res.json();
 
-    /* Remove typing indicator */
     var typingEl = document.getElementById(typingId);
     if (typingEl) typingEl.remove();
 
-    var reply = data.reply || data.response || data.message || data.answer || 'No response received.';
-    appState.chatHistory.push({ role: 'ai', content: reply });
-    feed.insertAdjacentHTML('beforeend', renderChatMessage('ai', reply));
-    feed.scrollTop = feed.scrollHeight;
-    notifyAiFailureIfAny(data.context && data.context.ai_error ? { ok: false, reason: data.context.ai_error } : null);
-  } catch (e) {
-    var typingEl = document.getElementById(typingId);
-    if (typingEl) typingEl.remove();
+    if (data.conversation_id) appState.copilotConversationId = data.conversation_id;
+    /* A finding selection applies to one question, not the whole conversation. */
+    appState.copilotFindingId = null;
 
-    var errMsg = 'Sorry, I couldn\'t connect to the AI service. Please try again.';
-    appState.chatHistory.push({ role: 'ai', content: errMsg });
-    feed.insertAdjacentHTML('beforeend', renderChatMessage('ai', errMsg));
-    feed.scrollTop = feed.scrollHeight;
-  }
-}
-
-/* ── Floating AI Assistant Drawer ────────────────────────────── */
-var AI_SUGGESTED = [
-  'Why is profit dropping?',
-  'What is our biggest risk?',
-  'Which customer should we follow up?',
-  'Why is cash running low?',
-  'What should I fix this week?'
-];
-
-function populateAiDrawer() {
-  var chips = document.getElementById('ai-drawer-chips');
-  if (chips) {
-    chips.innerHTML = AI_SUGGESTED.map(function(q) {
-      return '<button class="chat-chip" onclick="sendChatFromChip(this)" data-question="' + escapeHtml(q) + '">' + escapeHtml(q) + '</button>';
-    }).join('');
-  }
-  var feed = document.getElementById('chat-feed');
-  if (feed) {
-    if (appState.chatHistory.length === 0) {
-      feed.innerHTML = '<div class="empty-state" style="flex:1"><div class="empty-state-icon">' + icon('bot', { cls: 'icon-xl' }) + '</div><div class="empty-state-title">FinGuard AI</div><div class="empty-state-text">Ask me anything about your finances. I have full context from your latest analysis.</div></div>';
+    if (data.ok && data.answer) {
+      appState.chatHistory.push({ role: 'ai', content: data.answer.summary || '' });
+      feed.insertAdjacentHTML('beforeend', renderCopilotAnswer(data));
+      /* She talks while the answer is being read, then settles. The duration is
+         scaled to how much there is to read rather than a fixed beat. */
+      finnaSpeak(feed.lastElementChild, data.answer.summary || '');
     } else {
-      feed.innerHTML = appState.chatHistory.map(function(m) { return renderChatMessage(m.role, m.content); }).join('');
+      feed.insertAdjacentHTML('beforeend', renderCopilotUnavailable(data));
+      /* NOT EVERY "no answer" IS A FAULT. Declining because no analysis exists
+         for the period, or because the run is legacy, is the copilot working
+         correctly — renderCopilotUnavailable() exists precisely to stop those
+         being presented as breakage. An alarmed face would put the alarm back.
+         She simply stops talking. A genuine transport failure is handled in the
+         catch below, and that one does get the error face. */
+      mountFinnaOn(feed.lastElementChild, 'idle');
     }
     feed.scrollTop = feed.scrollHeight;
+  } catch (e) {
+    var el = document.getElementById(typingId);
+    if (el) el.remove();
+    feed.insertAdjacentHTML('beforeend', renderChatMessage('ai',
+      'I could not reach the copilot service. Your analysis is unaffected.'));
+    mountFinnaOn(feed.lastElementChild, 'error');
+    feed.scrollTop = feed.scrollHeight;
   }
 }
 
-function toggleAiDrawer() {
-  var drawer = document.getElementById('ai-drawer');
-  var backdrop = document.getElementById('ai-drawer-backdrop');
-  if (!drawer) return;
-  var isOpen = drawer.classList.toggle('open');
-  drawer.setAttribute('aria-hidden', isOpen ? 'false' : 'true');
-  if (backdrop) backdrop.classList.toggle('hidden', !isOpen);
-  if (isOpen) {
-    populateAiDrawer();
-    var input = document.getElementById('chat-input');
-    if (input) setTimeout(function() { if (input) input.focus(); }, 50);
+/**
+ * Render a structured copilot answer.
+ *
+ * THE VISUAL CONTRACT: a detected fact, an interpretation and a recommendation
+ * must never look alike. Facts carry a citation the user can open; inferences
+ * are explicitly labelled as interpretation; recommendations are advice.
+ */
+function renderCopilotAnswer(data) {
+  var a = data.answer || {};
+  var html = '<div class="chat-msg ai"><div class="chat-msg-avatar finna-slot"></div>'
+    + '<div class="chat-msg-bubble copilot-answer">';
+
+  if (a.summary) {
+    html += '<div class="copilot-summary">' + escapeHtml(a.summary) + '</div>';
+  }
+
+  if (a.facts && a.facts.length) {
+    html += '<div class="copilot-section copilot-facts">'
+      + '<div class="copilot-label copilot-label-fact">Detected in your data</div><ul>';
+    a.facts.forEach(function (f) {
+      html += '<li>' + escapeHtml(f.claim);
+      /* Evidence navigation: a fact citing a finding is inspectable. */
+      (f.citations || []).forEach(function (c) {
+        var m = String(c).match(/^finding:(fnd_[0-9a-f]+)$/);
+        if (m) {
+          html += ' <button class="copilot-cite" onclick="showCopilotEvidence(\'' + m[1]
+            + '\')">view evidence</button>';
+        }
+      });
+      html += '</li>';
+    });
+    html += '</ul></div>';
+  }
+
+  if (a.inferences && a.inferences.length) {
+    html += '<div class="copilot-section copilot-inferences">'
+      + '<div class="copilot-label copilot-label-inference">Interpretation &mdash; not a detected finding</div><ul>';
+    a.inferences.forEach(function (i) { html += '<li>' + escapeHtml(i.claim) + '</li>'; });
+    html += '</ul></div>';
+  }
+
+  if (a.recommendations && a.recommendations.length) {
+    html += '<div class="copilot-section copilot-recommendations">'
+      + '<div class="copilot-label copilot-label-recommendation">Suggested next steps</div><ul>';
+    a.recommendations.forEach(function (r) { html += '<li>' + escapeHtml(r.claim) + '</li>'; });
+    html += '</ul></div>';
+  }
+
+  if (a.limitations && a.limitations.length) {
+    html += '<div class="copilot-section copilot-limitations">'
+      + '<div class="copilot-label">What I could not determine</div><ul>';
+    a.limitations.forEach(function (l) { html += '<li>' + escapeHtml(l) + '</li>'; });
+    html += '</ul></div>';
+  }
+
+  /* Provenance, so an answer is auditable from the UI. */
+  if (data.meta) {
+    html += '<div class="copilot-provenance">Grounded in analysis '
+      + escapeHtml(String(data.meta.analysisRunId || '').slice(0, 12))
+      + ' for ' + escapeHtml(data.meta.period || '')
+      + (data.meta.claimsRejected
+        ? ' &middot; ' + data.meta.claimsRejected + ' unsupported statement(s) removed' : '')
+      + '</div>';
+  }
+
+  html += '</div></div>';
+  return html;
+}
+
+/** An honest unavailable/blocked response. */
+function renderCopilotUnavailable(data) {
+  var blocked = data.blocked;
+
+  /* A LEGACY RUN IS NOT A MISSING ONE.
+     An analysis saved before the application stored everything needed to reload
+     it cannot be rebuilt -- but it EXISTS, and the user has one clear action.
+     Labelling it "Not available" alongside every other failure told them their
+     analysis was gone, which is both wrong and alarming. It gets its own label
+     and its own action. */
+  if (data.reason === 'analysis_legacy_unrecoverable') {
+    var period = data.period ? String(data.period) : '';
+    return '<div class="chat-msg ai"><div class="chat-msg-avatar finna-slot"></div>'
+      + '<div class="chat-msg-bubble copilot-unavailable">'
+      + '<div class="copilot-label copilot-label-unavailable">Saved, but needs re-running</div>'
+      + '<div>' + escapeHtml(data.message
+        || 'This analysis was saved before the app stored everything needed to reload it.')
+      + '</div>'
+      + (period
+        ? '<div style="margin-top:0.6rem"><button class="btn btn-sm btn-primary" '
+          + 'onclick="runMonthlyReview(\'' + escapeHtml(period) + '\')">'
+          + 'Re-run ' + escapeHtml(period) + '</button></div>'
+        : '')
+      + '<div class="text-sm text-muted" style="margin-top:0.5rem">Your saved records '
+      + 'are unaffected &mdash; only the analysis needs recomputing.</div>'
+      + '</div></div>';
+  }
+
+  return '<div class="chat-msg ai"><div class="chat-msg-avatar finna-slot"></div>'
+    + '<div class="chat-msg-bubble copilot-unavailable">'
+    + '<div class="copilot-label copilot-label-unavailable">'
+    + (blocked ? 'Answer withheld' : 'Not available') + '</div>'
+    + '<div>' + escapeHtml(data.message || 'I could not answer that.') + '</div>'
+    + (blocked
+      ? '<div class="text-sm text-muted" style="margin-top:0.5rem">Your analysis is '
+        + 'unaffected &mdash; the findings and scores on your dashboard are computed by '
+        + 'the rules engine.</div>'
+      : '')
+    + '</div></div>';
+}
+
+/** Open the authoritative evidence behind a finding the answer cited. */
+async function showCopilotEvidence(findingId) {
+  try {
+    var res = await fetch('/api/copilot/evidence/' + encodeURIComponent(findingId));
+    var data = await res.json();
+    if (!data.ok) { showToast('That evidence is no longer available.', 'warning'); return; }
+
+    var e = data.evidence;
+    var rows = (e.evidence || []).map(function (row) {
+      var f = row.fields || {};
+      return '<tr><td>' + escapeHtml(f.date || '—') + '</td>'
+        + '<td>' + escapeHtml(f.counterparty || '—') + '</td>'
+        + '<td>' + escapeHtml(f.description || '—') + '</td>'
+        + '<td class="text-right">' + formatCurrency(f.amount) + '</td>'
+        + '<td class="text-sm text-muted">' + escapeHtml(row.source_record_id || '—') + '</td></tr>';
+    }).join('');
+
+    openModal('Evidence',
+      '<p class="text-sm text-muted">' + escapeHtml(e.calculation || '') + '</p>'
+      + (e.match_criteria
+        ? '<p class="text-sm">Matched on: <strong>'
+          + escapeHtml((e.match_criteria.fields || []).join(', ')) + '</strong></p>' : '')
+      + '<table class="data-table"><thead><tr><th>Date</th><th>Counterparty</th>'
+      + '<th>Description</th><th class="text-right">Amount</th><th>Record</th></tr></thead>'
+      + '<tbody>' + rows + '</tbody></table>');
+  } catch (err) {
+    showToast('Could not load the evidence.', 'error');
   }
 }
+
+/** Ask the copilot about a specific finding, from anywhere in the app. */
+function askCopilotAbout(findingId, question) {
+  appState.copilotFindingId = findingId;
+  navigate('chat');
+  setTimeout(function () {
+    var input = document.getElementById('chat-input');
+    if (input) { input.value = question || 'Explain this finding'; sendChat(); }
+  }, 150);
+}
+
 
 /* ── Settings ────────────────────────────────────────────────── */
 /* Plain-language guide for each contract: who the two organisations are and
@@ -2349,7 +4298,7 @@ function rpcFor(net) { return (net && net.rpcUrl) ? net.rpcUrl : 'https://api.av
 function recordOnchainMovement(mv) {
   return fetch('/api/avalanche/onchain/record', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: mutatingHeaders(),
     body: JSON.stringify(mv)
   }).then(function(r) { return r.json(); }).catch(function() { return null; });
 }
@@ -2918,7 +4867,7 @@ async function handleDeployTemplateClick(templateId) {
 
     fetch('/api/avalanche/contracts/deployments/record', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: mutatingHeaders(),
       body: JSON.stringify({
         templateId: template.id,
         contractName: template.contract_name,
@@ -2972,7 +4921,7 @@ function renderRulesPanel() {
 
   // Free (read-only): examples + upgrade prompt.
   if (!d.can_manage) {
-    var hf = '<p class="text-sm text-muted" style="margin-bottom:1rem;">Custom rules are available on <strong>Professional</strong> and <strong>Custom AI</strong>. Examples of what you could set up:</p><div class="rules-list">';
+    var hf = '<p class="text-sm text-muted" style="margin-bottom:1rem;">Custom rules are available on <strong>Growth</strong> and <strong>Custom AI</strong>. Examples of what you could set up:</p><div class="rules-list">';
     d.examples.forEach(function(ex) {
       hf += '<div class="rule-row rule-example"><div class="rule-row-main">' +
         '<div class="rule-row-name">' + escapeHtml(ex.name) + ' <span class="' + severityClass(ex.severity) + '">' + escapeHtml(ex.severity) + '</span></div>' +
@@ -3048,7 +4997,7 @@ function readRuleForm() {
 function previewRuleForm() {
   var out = document.getElementById('rule-preview-result');
   if (out) out.innerHTML = '<span class="text-muted">Checking against the current month…</span>';
-  fetch('/api/rules/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(readRuleForm()) })
+  fetch('/api/rules/preview', { method: 'POST', headers: mutatingHeaders(), body: JSON.stringify(readRuleForm()) })
     .then(function(r) { return r.json(); }).then(function(d) {
       if (!out) return;
       if (!d.ok) { out.innerHTML = '<span class="text-red">' + escapeHtml(d.message || 'Invalid rule') + '</span>'; return; }
@@ -3061,16 +5010,16 @@ function previewRuleForm() {
 }
 
 function saveRule() {
-  fetch('/api/rules', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(readRuleForm()) })
+  fetch('/api/rules', { method: 'POST', headers: mutatingHeaders(), body: JSON.stringify(readRuleForm()) })
     .then(function(r) { return r.json(); }).then(function(d) {
       if (d.ok) { showToast('Rule saved.', 'success'); loadRules(); }
-      else if (d.error === 'upgrade_required') showUpgradeModal(d.message || 'Custom rules are available on Professional or Custom AI.');
+      else if (d.error === 'upgrade_required') showUpgradeModal(d.message || 'Custom rules are available on Growth or Custom AI.');
       else showToast(d.message || 'Could not save rule.', 'error');
     }).catch(function() { showToast('Could not save rule.', 'error'); });
 }
 
 function toggleRule(id, enabled) {
-  fetch('/api/rules/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: enabled }) })
+  fetch('/api/rules/' + id, { method: 'PUT', headers: mutatingHeaders(), body: JSON.stringify({ enabled: enabled }) })
     .then(function(r) { return r.json(); }).then(function(d) { if (d.ok) showToast('Rule ' + (enabled ? 'enabled' : 'disabled') + '.', 'info'); });
 }
 
@@ -3112,6 +5061,8 @@ function renderSettings() {
     { key: 'rules',        label: 'Financial Rules' },
     { key: 'integrations', label: 'Integrations' },
     { key: 'assistant',    label: 'AI Assistant' },
+    { key: 'monitoring',   label: 'Monitoring' },
+    { key: 'team',         label: 'Team' },
     { key: 'alerts',       label: 'Risk & Alerts' },
     { key: 'access',       label: 'Access' }
   ];
@@ -3151,6 +5102,11 @@ function renderSettings() {
   html += '<div class="settings-panel' + (active === 'plan' ? ' active' : '') + '" data-section="plan">';
   html += '<div class="glass-card">' + cardHead('Plan & AI Credits', 'Your subscription and how much AI narration you have this month. The computed analysis is always free.') +
     '<div id="plan-panel-body"><p class="text-sm text-muted">Loading plan…</p></div></div>';
+  /* Upgrade cards and checkout. Populated from /api/billing/plans, so prices
+     and availability come from the server catalog — never from this file. */
+  html += '<div class="glass-card section-gap" id="billing-card">'
+    + cardHead('Upgrade', 'Plans, prices and payment.')
+    + '<div id="billing-body"><p class="text-sm text-muted">Loading plans…</p></div></div>';
   html += '</div>';
 
   /* ── Financial Rules ── */
@@ -3194,20 +5150,63 @@ function renderSettings() {
     keyControl += '<div class="text-xs text-emerald" style="margin-top:0.35rem;">' + icon('check-circle') + ' Currently saved: <span class="mono">' + escapeHtml(appState.aiApiKeyPreview) + '</span></div>';
   }
   html += '<div class="settings-panel' + (active === 'assistant' ? ' active' : '') + '" data-section="assistant">';
-  html += '<div class="glass-card">' + cardHead('AI Provider & Assistant', 'Your API key, your provider. Requests route through financial skills first.') +
-    '<div class="settings-fields">' +
-      field('AI Provider', providerControl) +
-      field('AI Assistant', assistantControl) +
-      field('AI API Key', keyControl, true) +
-    '</div></div>';
+  if (planAllows('bring_your_own_ai')) {
+    /* Custom AI: the customer owns the AI — provider and key are theirs. */
+    var byokNotice = '';
+    if (!appState.aiApiKeyConfigured) {
+      byokNotice = '<div class="byok-setup">' + icon('alert-triangle') +
+        '<div><strong>Add your API key to start.</strong><div class="text-xs text-muted">' +
+        'You are on Bring Your Own AI, so requests run on your provider. FinGuard will not fall back to managed AI — add a key below to enable AI features.</div></div></div>';
+    }
+    html += '<div class="glass-card">' + cardHead('AI Provider & Key', 'Your provider, your key, unmetered. FinGuard routes every AI request through your account.') +
+      byokNotice +
+      '<div class="settings-fields">' +
+        field('AI Provider', providerControl) +
+        field('AI Assistant', assistantControl) +
+        field('AI API Key', keyControl, true) +
+      '</div></div>';
+  } else {
+    /* Managed plans: the assistant persona is configurable, but the provider and
+       key are not — Bring Your Own AI is a Custom AI subscription capability. */
+    html += '<div class="glass-card">' + cardHead('AI Assistant', 'Choose the assistant persona. Your plan includes managed AI, so no API key is needed.') +
+      '<div class="settings-fields">' + field('AI Assistant', assistantControl) + '</div></div>';
+    html += lockedFeatureCard(
+      'bring_your_own_ai',
+      'Bring Your Own AI',
+      'Run FinGuard on your own AI provider and key, with no credit metering.'
+    );
+    if (appState.aiApiKeyConfigured) {
+      html += '<div class="text-xs text-muted" style="margin-top:0.75rem;">' + icon('info') +
+        ' You have an API key saved from a previous plan. It is kept safely but not used while you are on a managed plan.</div>';
+    }
+  }
+  html += '</div>';
+
+  /* ── Continuous Monitoring ── */
+  html += '<div class="settings-panel' + (active === 'monitoring' ? ' active' : '') + '" data-section="monitoring">';
+  html += '<div class="glass-card">' + cardHead('Continuous Monitoring', 'Automatically re-analyze your books on a schedule and alert you the moment a new issue appears — no duplicate alerts.') +
+    '<div id="monitoring-panel-body"><p class="text-sm text-muted">Loading monitoring…</p></div></div>';
+  html += '</div>';
+
+  /* ── Team ── */
+  html += '<div class="settings-panel' + (active === 'team' ? ' active' : '') + '" data-section="team">';
+  html += '<div class="glass-card">' + cardHead('Team & Roles', 'Invite teammates to your business. Each role grants a fixed set of permissions.') +
+    '<div id="team-panel-body"><p class="text-sm text-muted">Loading team…</p></div></div>';
   html += '</div>';
 
   /* ── Risk & Alerts ── */
   html += '<div class="settings-panel' + (active === 'alerts' ? ' active' : '') + '" data-section="alerts">';
   html += '<div class="glass-card">' + cardHead('Risk Thresholds', 'When to raise warnings across the dashboard.') +
     '<div class="settings-fields">' +
-      field('Runway Warning (days)', '<input type="number" class="settings-input" id="settings-runway" value="30" min="1" max="365" />') +
-      field('Concentration Threshold (%)', '<input type="number" class="settings-input" id="settings-concentration" value="40" min="1" max="100" />') +
+      /* JOB 7/8: these inputs were never read by anything, and the values they
+         displayed (30 days, 40%) contradicted the registry. Showing a user an
+         editable threshold that has no effect is worse than showing none, so
+         they are replaced by a pointer to the real, published methodology. */
+      field('Analysis thresholds',
+        '<a class="settings-link" href="/api/methodology?format=markdown" target="_blank" rel="noopener">'
+        + 'View the current rules and thresholds</a>'
+        + '<div class="text-sm text-muted">Thresholds are set by the deterministic rules '
+        + 'engine and are the same for every business.</div>') +
     '</div></div>';
   html += '<div class="glass-card">' + cardHead('Notifications', 'Where alerts are sent.') +
     '<div class="settings-fields">' +
@@ -3240,6 +5239,12 @@ function renderSettings() {
 
   /* Custom financial rules */
   loadRules();
+
+  /* Continuous monitoring */
+  loadMonitoring();
+
+  /* Team & roles */
+  loadTeam();
 
   var aiProviderSelect = document.getElementById('settings-ai-provider');
   if (aiProviderSelect) {
@@ -3313,7 +5318,7 @@ function renderZohoPanel(containerId) {
   if (disconnectBtn) {
     disconnectBtn.addEventListener('click', async function() {
       try {
-        await fetch('/api/oauth/zoho/disconnect', { method: 'POST' });
+        await fetch('/api/oauth/zoho/disconnect', { method: 'POST', headers: csrfHeaders() });
         appState.zohoApiKey = '';
         appState.zohoOrgId = '';
         renderZohoPanel(containerId);
@@ -3398,7 +5403,7 @@ async function deployContractFromSettings() {
   try {
     var res = await fetch('/api/avalanche/contracts/deploy', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: mutatingHeaders(),
       body: JSON.stringify(payload)
     });
     var data = await res.json();
@@ -3484,14 +5489,16 @@ async function loadContractDeploymentHistory() {
 async function saveSettings() {
   var name = document.getElementById('settings-name').value.trim();
   var company = document.getElementById('settings-company').value.trim();
-  var aiProvider = document.getElementById('settings-ai-provider').value;
-  var aiApiKey = document.getElementById('settings-ai-api-key').value.trim();
+  var aiProviderEl = document.getElementById('settings-ai-provider');
+  var aiProvider = aiProviderEl ? aiProviderEl.value : appState.aiProvider;
+  var aiKeyEl = document.getElementById('settings-ai-api-key');
+  var aiApiKey = aiKeyEl ? aiKeyEl.value.trim() : '';
   var aiAssistant = document.getElementById('settings-ai-assistant').value;
 
   try {
     var res = await fetch('/api/profile', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: mutatingHeaders(),
       body: JSON.stringify({
         name: name,
         business_name: company,
@@ -3501,6 +5508,10 @@ async function saveSettings() {
       })
     });
     var data = await res.json();
+    if (!data.ok && data.error === 'upgrade_required') {
+      showUpgradeModal(data.message || 'Bring Your Own AI is available on the Custom AI plan.');
+      return;
+    }
     if (data.ok) {
       appState.userName = name;
       appState.businessName = company;
@@ -3531,12 +5542,468 @@ async function saveSettings() {
   }
 }
 
+/* ── Continuous Monitoring (settings) ────────────────────────── */
+var MONITOR_FREQ_LABELS = { daily: 'Daily', weekly: 'Weekly', monthly: 'Monthly' };
+var appMonitoring = null;
+
+function formatDateTime(iso) {
+  if (!iso) return '—';
+  try { return new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); }
+  catch (e) { return '—'; }
+}
+function formatRelativeTime(iso) {
+  if (!iso) return '';
+  var t = Date.parse(iso);
+  if (!isFinite(t)) return '';
+  var s = Math.floor((Date.now() - t) / 1000);
+  if (s < 60) return 'just now';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  return Math.floor(s / 86400) + 'd ago';
+}
+
+function loadMonitoring() {
+  var el = document.getElementById('monitoring-panel-body');
+  if (!el) return;
+  fetch('/api/monitoring').then(function(r) { return r.json(); }).then(function(d) {
+    if (!d || !d.ok) { el.innerHTML = '<p class="text-sm text-muted">Could not load monitoring.</p>'; return; }
+    appMonitoring = d;
+    renderMonitoringPanel(d);
+  }).catch(function() { el.innerHTML = '<p class="text-sm text-muted">Could not load monitoring.</p>'; });
+}
+
+function renderMonitoringPanel(d) {
+  var el = document.getElementById('monitoring-panel-body');
+  if (!el) return;
+  var mon = d.monitoring || {};
+  var allowed = d.allowed_frequencies || [];
+  var isPro = allowed.indexOf('daily') !== -1;
+  var opts = ['daily', 'weekly', 'monthly'].map(function(f) {
+    var locked = allowed.indexOf(f) === -1;
+    return '<option value="' + f + '"' + (mon.frequency === f ? ' selected' : '') + (locked ? ' disabled' : '') +
+      '>' + MONITOR_FREQ_LABELS[f] + (locked ? ' — Growth' : '') + '</option>';
+  }).join('');
+
+  var statusCls = mon.lastStatus === 'error' ? 'text-red' : mon.lastStatus === 'ok' ? 'text-emerald' : 'text-muted';
+  var statusTxt = mon.lastStatus ? (mon.lastStatus === 'ok'
+    ? 'Healthy' + (mon.lastNewIssues != null ? ' · ' + mon.lastNewIssues + ' new last run' : '')
+    : 'Error — ' + escapeHtml(mon.lastError || 'sync failed')) : 'Not run yet';
+
+  var canSchedule = d.can_schedule !== undefined ? d.can_schedule : (allowed.indexOf('daily') !== -1);
+
+  var html = '';
+
+  if (!canSchedule) {
+    /* Starter: automatic monitoring is a paid capability, but MANUAL analysis is
+       unlimited -- so we show what's locked without taking anything away. */
+    html += '<div class="mon-manual">' + icon('check-circle') +
+      '<div><div class="mon-toggle-title">Manual analysis — unlimited</div>' +
+      '<div class="text-xs text-muted">Run a fresh analysis whenever you like. Your dashboard, alerts and reports all stay up to date.</div></div></div>';
+    html += '<div style="margin-top:1rem;"><button type="button" class="btn-primary btn-small" onclick="syncMonitoringNow()">' + icon('clock') + ' Run analysis now</button></div>';
+
+    html += '<div class="mon-locked">' +
+      '<div class="locked-head">' + lockIcon() +
+        '<div><div class="locked-title">Automatic monitoring</div>' +
+        '<div class="locked-sub">Let FinGuard analyze your books on a schedule and alert you the moment a new issue appears.</div></div>' +
+        '<span class="locked-badge">Growth</span></div>' +
+      '<ul class="locked-list">' +
+        '<li>Daily, weekly or monthly scheduled analysis</li>' +
+        '<li>Automatic alerts on new issues — no duplicate notifications</li>' +
+        '<li>Runs even when you are not signed in</li>' +
+      '</ul>' +
+      '<button type="button" class="btn-primary btn-small" onclick="showUpgradeModal(\'Automatic scheduled monitoring is available on the Growth and Custom AI plans. Manual analysis stays unlimited on Starter.\')">Unlock automatic monitoring</button>' +
+    '</div>';
+
+    if (mon.lastRunAt) {
+      html += '<div class="mon-status">' +
+        '<div class="mon-stat"><span class="mon-stat-label">Last analysis</span><span class="mon-stat-val">' + formatDateTime(mon.lastRunAt) + '</span></div>' +
+        '<div class="mon-stat"><span class="mon-stat-label">Status</span><span class="mon-stat-val ' + statusCls + '">' + statusTxt + '</span></div>' +
+      '</div>';
+    }
+    el.innerHTML = html;
+    return;
+  }
+
+  html += '<div class="mon-toggle-row">' +
+    '<label class="switch"><input type="checkbox" id="mon-enabled"' + (mon.enabled ? ' checked' : '') + ' onchange="saveMonitoring()"><span class="switch-slider"></span></label>' +
+    '<div><div class="mon-toggle-title">' + (mon.enabled ? 'Monitoring is on' : 'Monitoring is off') + '</div>' +
+    '<div class="text-xs text-muted">Growth — sync as often as daily.</div></div></div>';
+
+  html += '<div class="settings-fields" style="margin-top:1.1rem;">' +
+    '<div class="settings-group"><label class="settings-label">Sync frequency</label>' +
+    '<select class="settings-input" id="mon-frequency" onchange="saveMonitoring()">' + opts + '</select></div></div>';
+
+  html += '<div class="mon-status">' +
+    '<div class="mon-stat"><span class="mon-stat-label">Last sync</span><span class="mon-stat-val">' + formatDateTime(mon.lastRunAt) + '</span></div>' +
+    '<div class="mon-stat"><span class="mon-stat-label">Next due</span><span class="mon-stat-val">' + (mon.enabled ? (mon.nextDueAt ? formatDateTime(mon.nextDueAt) : 'Soon') : '—') + '</span></div>' +
+    '<div class="mon-stat"><span class="mon-stat-label">Status</span><span class="mon-stat-val ' + statusCls + '">' + statusTxt + '</span></div>' +
+  '</div>';
+
+  html += '<div style="margin-top:1.1rem;"><button type="button" class="btn-secondary btn-small" onclick="syncMonitoringNow()">' + icon('clock') + ' Sync now</button></div>';
+  el.innerHTML = html;
+}
+
+function saveMonitoring() {
+  var enabled = document.getElementById('mon-enabled');
+  var freq = document.getElementById('mon-frequency');
+  var body = {};
+  if (enabled) body.enabled = enabled.checked;
+  if (freq) body.frequency = freq.value;
+  fetch('/api/monitoring', { method: 'POST', headers: mutatingHeaders(), body: JSON.stringify(body) })
+    .then(function(r) { return r.json(); }).then(function(d) {
+      if (d && d.ok) {
+        appMonitoring = d;
+        renderMonitoringPanel(d);
+        showToast('Monitoring ' + (d.monitoring.enabled ? 'on (' + MONITOR_FREQ_LABELS[d.monitoring.frequency] + ')' : 'off'), 'success');
+        if (d.monitoring.enabled && window.Notification && Notification.permission === 'default') {
+          try { Notification.requestPermission(); } catch (e) {}
+        }
+        loadNotifications();
+      } else if (d && d.error === 'upgrade_required') {
+        showUpgradeModal(d.message || 'Automatic scheduled monitoring is available on the Growth and Custom AI plans.');
+        loadMonitoring();
+      } else { showToast('Could not update monitoring.', 'error'); }
+    }).catch(function() { showToast('Could not update monitoring.', 'error'); });
+}
+
+function syncMonitoringNow() {
+  showToast('Syncing your books…', 'info');
+  fetch('/api/monitoring/run', { method: 'POST', headers: mutatingHeaders(), body: '{}' })
+    .then(function(r) { return r.json(); }).then(function(d) {
+      if (d && d.ok) {
+        var n = (d.result && d.result.newIssues) || 0;
+        showToast(n > 0 ? (n + ' new issue' + (n > 1 ? 's' : '') + ' found') : 'Sync complete — no new issues', 'success');
+        applyNotifications(d.notifications || [], d.unread || 0);
+        if (document.getElementById('monitoring-panel-body') && d.monitoring) {
+          renderMonitoringPanel({ monitoring: d.monitoring, allowed_frequencies: (appMonitoring && appMonitoring.allowed_frequencies) || ['monthly'] });
+        }
+      } else { showToast('Sync failed.', 'error'); }
+    }).catch(function() { showToast('Sync failed.', 'error'); });
+}
+
+/* ── Notifications (header bell) ──────────────────────────────── */
+var notifState = { items: [], unread: 0 };
+
+function loadNotifications() {
+  return fetch('/api/notifications').then(function(r) { return r.json(); }).then(function(d) {
+    if (d && d.ok) {
+      applyNotifications(d.notifications || [], d.unread || 0);
+      if (d.synced && d.synced.newIssues > 0) maybeBrowserNotify(d.synced.newIssues);
+    }
+    return d;
+  }).catch(function() {});
+}
+
+function applyNotifications(items, unread) {
+  notifState.items = items || [];
+  notifState.unread = unread != null ? unread : notifState.items.filter(function(n) { return !n.read; }).length;
+  renderNotifBadge();
+  var pop = document.getElementById('notif-popover');
+  if (pop && !pop.classList.contains('hidden')) renderNotifList();
+}
+
+function renderNotifBadge() {
+  var b = document.getElementById('notif-badge');
+  if (!b) return;
+  if (notifState.unread > 0) { b.textContent = notifState.unread > 9 ? '9+' : String(notifState.unread); b.classList.remove('hidden'); }
+  else b.classList.add('hidden');
+}
+
+function renderNotifList() {
+  var list = document.getElementById('notif-list');
+  if (!list) return;
+  if (!notifState.items.length) {
+    list.innerHTML = '<div class="notif-empty">' + icon('check-circle') + ' No alerts — you’re all caught up.</div>';
+    return;
+  }
+  list.innerHTML = notifState.items.map(function(n) {
+    return '<div class="notif-item' + (n.read ? ' read' : '') + '">' +
+      '<span class="notif-dot notif-dot-' + (n.level || 'low') + '"></span>' +
+      '<div class="notif-item-main">' +
+        '<div class="notif-item-title">' + escapeHtml(n.title || 'Alert') + '</div>' +
+        '<div class="notif-item-body">' + escapeHtml(n.body || '') + '</div>' +
+        '<div class="notif-item-meta">' + escapeHtml(formatRelativeTime(n.ts)) + (n.period ? ' · ' + escapeHtml(getMonthLabel(n.period)) : '') + '</div>' +
+      '</div></div>';
+  }).join('');
+}
+
+function toggleNotifPanel() {
+  var pop = document.getElementById('notif-popover');
+  if (!pop) return;
+  if (pop.classList.contains('hidden')) {
+    var prof = document.getElementById('profile-popover');
+    if (prof) prof.classList.add('hidden');
+    pop.classList.remove('hidden');
+    renderNotifList();
+    if (notifState.unread > 0) markAllNotifsRead();
+  } else {
+    pop.classList.add('hidden');
+  }
+}
+function closeNotifPanel() { var p = document.getElementById('notif-popover'); if (p) p.classList.add('hidden'); }
+
+function markAllNotifsRead() {
+  fetch('/api/notifications/read', { method: 'POST', headers: mutatingHeaders(), body: JSON.stringify({ all: true }) })
+    .then(function(r) { return r.json(); }).then(function(d) {
+      notifState.items.forEach(function(n) { n.read = true; });
+      notifState.unread = (d && d.unread) || 0;
+      renderNotifBadge();
+      renderNotifList();
+    }).catch(function() {});
+}
+
+function maybeBrowserNotify(count) {
+  if (window.Notification && Notification.permission === 'granted') {
+    try {
+      new Notification('FinGuard: ' + count + ' new financial alert' + (count > 1 ? 's' : ''), {
+        body: 'New issues were detected in your latest sync.', tag: 'finguard-monitor'
+      });
+    } catch (e) {}
+  }
+}
+
+document.addEventListener('click', function(ev) {
+  var pop = document.getElementById('notif-popover');
+  var bell = document.getElementById('notif-bell');
+  if (!pop || pop.classList.contains('hidden')) return;
+  if (pop.contains(ev.target) || (bell && bell.contains(ev.target))) return;
+  pop.classList.add('hidden');
+});
+
+/* ── Team & Roles (settings) ──────────────────────────────────── */
+var appTeam = null;
+
+function statusBadge(status) {
+  if (status === 'active') return '<span class="team-badge team-badge-active">Active</span>';
+  if (status === 'pending') return '<span class="team-badge team-badge-pending">Invited</span>';
+  return '<span class="team-badge">' + escapeHtml(status || '—') + '</span>';
+}
+
+function loadTeam() {
+  var el = document.getElementById('team-panel-body');
+  if (!el) return;
+  fetch('/api/team').then(function(r) { return r.json(); }).then(function(d) {
+    if (!d || !d.ok) { el.innerHTML = '<p class="text-sm text-muted">Could not load team.</p>'; return; }
+    appTeam = d;
+    renderTeamPanel(d);
+  }).catch(function() { el.innerHTML = '<p class="text-sm text-muted">Could not load team.</p>'; });
+}
+
+function renderTeamPanel(d) {
+  var el = document.getElementById('team-panel-body');
+  if (!el) return;
+  var matrix = d.matrix || { roles: [], permissions: [] };
+
+  if (d.can_manage === false) {
+    var owner = (d.members || [])[0] || {};
+    var locked = '<div class="team-members"><div class="team-member-row">' +
+      '<div class="team-member-id"><div class="team-avatar">' + escapeHtml((owner.name || owner.email || 'F').slice(0, 1).toUpperCase()) + '</div>' +
+      '<div><div class="team-member-name">' + escapeHtml(owner.name || 'You') + '</div>' +
+      '<div class="team-member-email">' + escapeHtml(owner.email || '') + '</div></div></div>' +
+      '<div class="team-member-role"><span class="team-role-owner">' + icon('shield') + ' Founder · Owner</span></div>' +
+      '<div class="team-member-status">' + statusBadge('active') + '</div><div></div></div></div>';
+
+    locked += '<div class="mon-locked">' +
+      '<div class="locked-head">' + lockIcon() +
+        '<div><div class="locked-title">Team collaboration</div>' +
+        '<div class="locked-sub">Invite your finance officer, accountant, auditor or investors — each with the right level of access.</div></div>' +
+        '<span class="locked-badge">Growth</span></div>' +
+      '<ul class="locked-list">' +
+        '<li>5 roles: Founder, Finance Officer, Accountant, Auditor, Investor</li>' +
+        '<li>Granular permissions: view, edit, approve, comment, resolve</li>' +
+        '<li>Comment on and resolve findings together</li>' +
+      '</ul>' +
+      '<button type="button" class="btn-primary btn-small" onclick="showUpgradeModal(\'Team members, roles and accountant collaboration are available on the Growth and Custom AI plans.\')">Unlock team collaboration</button>' +
+    '</div>';
+
+    /* Still show what each role can do, so the value is concrete. */
+    locked += '<div class="settings-card-head" style="margin-top:1.4rem;"><h3>What each role can do</h3></div>';
+    locked += '<div class="team-matrix-wrap"><table class="team-matrix"><thead><tr><th>Role</th>';
+    matrix.permissions.forEach(function(pm) { locked += '<th>' + escapeHtml(pm.label) + '</th>'; });
+    locked += '</tr></thead><tbody>';
+    matrix.roles.forEach(function(r) {
+      locked += '<tr><td class="team-matrix-role">' + escapeHtml(r.label) + '</td>';
+      matrix.permissions.forEach(function(pm) {
+        var has = r.permissions.indexOf(pm.key) !== -1;
+        locked += '<td>' + (has ? '<span class="team-check text-emerald">' + icon('check-circle') + '</span>' : '<span class="team-dash">—</span>') + '</td>';
+      });
+      locked += '</tr>';
+    });
+    locked += '</tbody></table></div>';
+    el.innerHTML = locked;
+    return;
+  }
+
+  var assignRoles = matrix.roles.filter(function(r) { return r.key !== 'founder'; });
+  var roleOpts = function(sel) {
+    return assignRoles.map(function(r) {
+      return '<option value="' + r.key + '"' + (r.key === sel ? ' selected' : '') + '>' + escapeHtml(r.label) + '</option>';
+    }).join('');
+  };
+
+  var html = '';
+
+  /* Members table */
+  html += '<div class="team-members">';
+  (d.members || []).forEach(function(m) {
+    var roleCell = m.isOwner
+      ? '<span class="team-role-owner">' + icon('shield') + ' Founder · Owner</span>'
+      : '<select class="settings-input team-role-select" onchange="changeMemberRole(\'' + m.id + '\', this.value)">' + roleOpts(m.role) + '</select>';
+    var actionCell = m.isOwner
+      ? ''
+      : '<button type="button" class="team-remove" title="Remove" onclick="removeTeamMember(\'' + m.id + '\',\'' + escapeHtml(m.name || m.email) + '\')">' + icon('x-circle') + '</button>';
+    html += '<div class="team-member-row">' +
+      '<div class="team-member-id"><div class="team-avatar">' + escapeHtml((m.name || m.email || '?').slice(0, 1).toUpperCase()) + '</div>' +
+        '<div><div class="team-member-name">' + escapeHtml(m.name || '—') + '</div>' +
+        '<div class="team-member-email">' + escapeHtml(m.email || '') + '</div></div></div>' +
+      '<div class="team-member-role">' + roleCell + '</div>' +
+      '<div class="team-member-status">' + statusBadge(m.status) + '</div>' +
+      '<div class="team-member-actions">' + actionCell + '</div>' +
+    '</div>';
+  });
+  html += '</div>';
+
+  /* Invite form */
+  html += '<div class="team-invite">' +
+    '<div class="settings-card-head" style="margin-top:1.4rem;"><h3>Invite a teammate</h3><p>They get an invite link to join this business with the role you choose.</p></div>' +
+    '<div class="team-invite-row">' +
+      '<input type="email" class="settings-input" id="team-invite-email" placeholder="teammate@company.com" />' +
+      '<select class="settings-input" id="team-invite-role">' + roleOpts('finance_officer') + '</select>' +
+      '<button type="button" class="btn-primary" onclick="inviteTeamMember()">' + icon('users') + ' Send invite</button>' +
+    '</div>' +
+    '<div id="team-invite-result"></div>' +
+  '</div>';
+
+  /* Businesses I've joined */
+  if (d.memberships && d.memberships.length) {
+    html += '<div class="settings-card-head" style="margin-top:1.4rem;"><h3>Businesses you’ve joined</h3></div>';
+    html += '<div class="team-members">';
+    d.memberships.forEach(function(ms) {
+      html += '<div class="team-member-row"><div class="team-member-id"><div class="team-avatar">' + escapeHtml((ms.business_name || 'B').slice(0, 1).toUpperCase()) + '</div>' +
+        '<div><div class="team-member-name">' + escapeHtml(ms.business_name) + '</div><div class="team-member-email">You are ' + escapeHtml(ms.role_label) + '</div></div></div>' +
+        '<div></div><div>' + statusBadge('active') + '</div><div></div></div>';
+    });
+    html += '</div>';
+  }
+
+  /* Permission matrix reference */
+  html += '<div class="settings-card-head" style="margin-top:1.4rem;"><h3>What each role can do</h3></div>';
+  html += '<div class="team-matrix-wrap"><table class="team-matrix"><thead><tr><th>Role</th>';
+  matrix.permissions.forEach(function(p) { html += '<th>' + escapeHtml(p.label) + '</th>'; });
+  html += '</tr></thead><tbody>';
+  matrix.roles.forEach(function(r) {
+    html += '<tr><td class="team-matrix-role">' + escapeHtml(r.label) + '</td>';
+    matrix.permissions.forEach(function(p) {
+      var has = r.permissions.indexOf(p.key) !== -1;
+      html += '<td>' + (has ? '<span class="team-check text-emerald">' + icon('check-circle') + '</span>' : '<span class="team-dash">—</span>') + '</td>';
+    });
+    html += '</tr>';
+  });
+  html += '</tbody></table></div>';
+
+  el.innerHTML = html;
+}
+
+function inviteTeamMember() {
+  var email = document.getElementById('team-invite-email');
+  var role = document.getElementById('team-invite-role');
+  var out = document.getElementById('team-invite-result');
+  if (!email || !email.value.trim()) { showToast('Enter an email to invite.', 'error'); return; }
+  fetch('/api/team/invite', {
+    method: 'POST', headers: mutatingHeaders(),
+    body: JSON.stringify({ email: email.value.trim(), role: role ? role.value : 'finance_officer' })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d && d.ok) {
+      showToast('Invite created for ' + d.member.email, 'success');
+      if (out && d.invite_link) {
+        out.innerHTML = '<div class="team-link-box">' + icon('link') + ' <span class="team-link">' + escapeHtml(d.invite_link) + '</span>' +
+          '<button type="button" class="btn-secondary btn-small" onclick="copyInviteLink(\'' + escapeHtml(d.invite_link) + '\')">Copy</button></div>';
+      }
+      loadTeam();
+    } else {
+      if (d && d.error === 'upgrade_required') {
+        showUpgradeModal(d.message || 'Team collaboration is available on the Growth and Custom AI plans.');
+        loadTeam();
+        return;
+      }
+      var msg = d && d.error === 'already_on_team' ? 'That email is already on your team.'
+        : d && d.error === 'invalid_email' ? 'That email address is not valid.'
+        : 'Could not send invite.';
+      showToast(msg, 'error');
+    }
+  }).catch(function() { showToast('Could not send invite.', 'error'); });
+}
+
+function changeMemberRole(id, role) {
+  fetch('/api/team/member/' + encodeURIComponent(id), {
+    method: 'PUT', headers: mutatingHeaders(), body: JSON.stringify({ role: role })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d && d.ok) { showToast('Role updated to ' + role.replace('_', ' '), 'success'); loadTeam(); }
+    else { showToast('Could not update role.', 'error'); loadTeam(); }
+  }).catch(function() { showToast('Could not update role.', 'error'); });
+}
+
+function removeTeamMember(id, name) {
+  if (!confirm('Remove ' + name + ' from the team?')) return;
+  fetch('/api/team/member/' + encodeURIComponent(id), { method: 'DELETE', headers: csrfHeaders() })
+    .then(function(r) { return r.json(); }).then(function(d) {
+      if (d && d.ok) { showToast('Removed ' + name, 'success'); loadTeam(); }
+      else { showToast('Could not remove member.', 'error'); }
+    }).catch(function() { showToast('Could not remove member.', 'error'); });
+}
+
+function copyInviteLink(link) {
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(link).then(function() { showToast('Invite link copied', 'success'); })
+      .catch(function() { showToast('Copy failed — select the link manually.', 'error'); });
+  } else { showToast('Copy not supported — select the link manually.', 'info'); }
+}
+
+function acceptInviteFromUrl() {
+  var params = new URLSearchParams(location.search);
+  var token = params.get('invite');
+  if (!token) return;
+  fetch('/api/team/accept', {
+    method: 'POST', headers: mutatingHeaders(), body: JSON.stringify({ token: token })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d && d.ok) {
+      showToast('You joined ' + d.business_name + ' as ' + d.role_label, 'success');
+    } else if (d && d.error === 'invalid_or_used_invite') {
+      showToast('That invite link is invalid or already used.', 'error');
+    } else {
+      showToast('Could not accept the invite.', 'error');
+    }
+    /* Strip the token from the URL so a refresh doesn't retry it. */
+    params.delete('invite');
+    var qs = params.toString();
+    history.replaceState({}, '', location.pathname + (qs ? '?' + qs : '') + location.hash);
+  }).catch(function() {});
+}
+
 /* ── 10. Initialization ──────────────────────────────────────── */
 (function init() {
-  checkOnboarding();
-  handleOauthResultFromUrl();
-  loadNetworks();
-  loadEntitlement();
+  /* EACH STEP IS ISOLATED. These ran as a bare sequence, so the first one to
+     throw synchronously silently cancelled every step after it — that is how a
+     missing helper in loadScoreBands() ended up disabling Google login. A
+     startup task that fails should degrade its own feature, not the ones that
+     happen to be listed below it. */
+  function step(name, fn) {
+    try { fn(); } catch (e) {
+      console.error('init step failed: ' + name, e);
+    }
+  }
+
+  // Load the registry's score bands before rendering, so no page paints a
+  // score with a client-side threshold.
+  step('loadScoreBands', loadScoreBands);
+  step('checkOnboarding', checkOnboarding);
+  step('handleOauthResultFromUrl', handleOauthResultFromUrl);
+  step('acceptInviteFromUrl', acceptInviteFromUrl);
+  step('loadNetworks', loadNetworks);
+  step('loadEntitlement', loadEntitlement);
+  step('loadNotifications', loadNotifications);
+  /* Refresh alerts periodically (also triggers a due catch-up sync server-side). */
+  setInterval(loadNotifications, 5 * 60 * 1000);
 
   /* Route on load */
   var initialPage = location.hash.slice(1) || 'overview';

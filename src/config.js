@@ -46,7 +46,15 @@ module.exports = {
   businessAddress: process.env.BUSINESS_ADDRESS || "Nairobi, Kenya",
   aiApiBaseUrl: process.env.AI_API_BASE_URL || "https://api.openai.com/v1",
   aiApiModel: process.env.AI_API_MODEL || "gpt-5-mini",
-  aiApiTimeoutMs: Number(process.env.AI_API_TIMEOUT_MS || 15000),
+  // 0 (the default) disables the client-side abort timeout entirely, so slow
+  // providers (e.g. the NVIDIA free tier) finish their response instead of being
+  // aborted and falling back to the deterministic rule-based report. Set
+  // AI_API_TIMEOUT_MS to a positive value to re-enable a hard timeout.
+  aiApiTimeoutMs: Number(process.env.AI_API_TIMEOUT_MS || 0),
+  // How many total attempts an AI request gets when the *connection* fails
+  // transiently (e.g. UND_ERR_CONNECT_TIMEOUT on a flaky IPv6 route). Provider
+  // rejections (bad key, quota) are never retried.
+  aiNetworkRetries: Number(process.env.AI_NETWORK_RETRIES || 3),
   enableAiAnalysis: String(process.env.ENABLE_AI_ANALYSIS || "true") === "true",
   // Backs the app's built-in default AI (no user-provided key required). One
   // key from build.nvidia.com unlocks every model the app routes to.

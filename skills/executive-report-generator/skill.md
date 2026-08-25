@@ -41,7 +41,7 @@ Customer concentration ratio = 58%
 
 **Technical Finding:**
 ```
-runwayMonths = 1.4, severity = "high"
+runwayMonths = 1.4, severity = <resolved by the engine>
 ```
 
 **Executive Explanation:**
@@ -101,7 +101,7 @@ duplicates.length = 3, total_amount = 135000
   "executive_summary": "Your business is operationally stable but faces two critical risks this month: cash runway has dropped to 43 days, and more than half your procurement goes through a single supplier. Both issues are manageable if addressed this week.",
   "management_report": {
     "headline": "ABC Traders: January 2026 — Moderate Risk",
-    "health_score": "61/100 (Fair)",
+    "health_score": "<score>/100 (<category from registry>)",
     "key_insights": [
       "Cash will run out in approximately 6 weeks at current burn rate",
       "One supplier controls 58% of your procurement — this is a supply chain risk",
@@ -114,7 +114,7 @@ duplicates.length = 3, total_amount = 135000
       "Customer base is diversified across 12 active accounts"
     ],
     "what_needs_attention": [
-      "Cash runway is below 60 days — the danger zone",
+      "Cash runway is below the engine's warning threshold",
       "Supplier ABC has too much pricing power",
       "3 transactions need reconciliation review"
     ]

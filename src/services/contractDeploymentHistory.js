@@ -1,20 +1,26 @@
 const fs = require("fs");
 const path = require("path");
-const config = require("../config");
 
-const historyFile = path.resolve(config.reportsDir, "contract-deployments.jsonl");
+// SECURITY: previously a single GLOBAL file shared by every tenant.
+// See docs/THREAT_MODEL.md T4.
+function historyFileFor(tenantDir) {
+  if (!tenantDir) throw new Error("contractDeploymentHistory: tenantDir is required");
+  return path.resolve(tenantDir, "contract-deployments.jsonl");
+}
 
-function ensureHistoryFile() {
-  if (!fs.existsSync(config.reportsDir)) {
-    fs.mkdirSync(config.reportsDir, { recursive: true });
+function ensureHistoryFile(tenantDir) {
+  const historyFile = historyFileFor(tenantDir);
+  if (!fs.existsSync(tenantDir)) {
+    fs.mkdirSync(tenantDir, { recursive: true });
   }
   if (!fs.existsSync(historyFile)) {
     fs.writeFileSync(historyFile, "");
   }
+  return historyFile;
 }
 
-function appendDeploymentRecord(record) {
-  ensureHistoryFile();
+function appendDeploymentRecord(tenantDir, record) {
+  const historyFile = ensureHistoryFile(tenantDir);
   const line = JSON.stringify({
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     created_at: new Date().toISOString(),
@@ -23,8 +29,8 @@ function appendDeploymentRecord(record) {
   fs.appendFileSync(historyFile, `${line}\n`);
 }
 
-function listDeploymentRecords(limit = 25) {
-  ensureHistoryFile();
+function listDeploymentRecords(tenantDir, limit = 25) {
+  const historyFile = ensureHistoryFile(tenantDir);
   const max = Math.max(1, Math.min(100, Number(limit) || 25));
   const content = fs.readFileSync(historyFile, "utf-8").trim();
   if (!content) return [];

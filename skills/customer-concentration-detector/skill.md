@@ -6,6 +6,27 @@ dependencies: node>=18
 
 # Customer Concentration Detector
 
+## Methodology
+
+> **This document is NOT the source of truth for any number.**
+>
+> Every threshold, weight, severity, confidence value and score band this skill
+> refers to is defined in the authoritative rules registry at
+> `src/domain/rules/registry.js` and is applied by the deterministic engine.
+> The generated, always-current statement of that methodology is available at
+> `GET /api/methodology` (and rendered from `src/domain/rules/methodology.js`).
+>
+> This file previously restated those numbers, and they had drifted from the
+> code. Because these files are loaded into the AI's system prompt at runtime,
+> the drift meant the model was being instructed with figures the engine does
+> not use. The numbers have therefore been removed rather than corrected: a
+> hand-maintained copy will drift again.
+>
+> **The deterministic engine decides. This skill explains what the engine
+> decided, in language a business owner can act on.**
+
+
+
 ## Purpose
 
 Identify overreliance on specific customers that could threaten future revenue stability.
@@ -87,15 +108,6 @@ Answers: **"Which customer could cripple the company if they leave?"**
   ]
 }
 ```
-
-## Concentration Thresholds
-
-| Threshold | Classification | Severity |
-|---|---|---|
-| Any customer > 50% of revenue | Customer concentration | 🔴 High |
-| Any customer > 30% of revenue | Elevated dependency | 🟠 Medium |
-| Top 3 customers > 80% of revenue | Revenue concentration | 🟠 Medium |
-| All customers < 30% | Healthy diversification | 🟢 Low |
 
 ## Risk Implications
 

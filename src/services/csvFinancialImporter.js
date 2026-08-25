@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const { parse } = require("csv-parse/sync");
 
 const HEADER_ALIASES = {
@@ -7,6 +8,10 @@ const HEADER_ALIASES = {
   debit: ["debit", "withdrawal", "money out", "debit amount", "out"],
   credit: ["credit", "deposit", "money in", "credit amount", "in"],
   counterparty: ["counterparty", "payee", "vendor", "customer", "name", "third party", "paid to", "received from"],
+  // JOB 7: currency now SURVIVES ingestion. It was dropped entirely, so every
+  // uploaded row arrived unlabelled and the engine could not tell a KES total
+  // from a mixed-currency one.
+  currency: ["currency", "currency code", "ccy", "curr"],
   account: ["account", "account name", "bank account"]
 };
 
@@ -96,6 +101,42 @@ function parseFinancialCsv({ csvText, period, businessName, currentCashBalance }
   }
 
   const skipped = [];
+  /**
+   * CSV PROVENANCE (JOB 5).
+   *
+   * A CSV has no natural primary key, but a finding must still be able to cite
+   * the record that produced it. The id is therefore derived from the row's
+   * CONTENT — date, amount, description, counterparty, account — hashed with the
+   * period.
+   *
+   * Why content and not array position: rows can be re-exported in a different
+   * order, so a positional id would point at a DIFFERENT transaction on the next
+   * upload, silently re-attributing findings. A content hash is stable across
+   * reordering and identical across re-uploads of the same file, which is also
+   * what makes re-ingestion idempotent (the DB unique key is
+   * (tenant, source_system, source_record_id)).
+   *
+   * Genuinely identical rows (same date, amount, description, counterparty) are
+   * a real possibility — a true duplicate payment. An occurrence index is
+   * appended so each physical row keeps its own identity while remaining
+   * deterministic for a given file.
+   */
+  const seenRowKeys = new Map();
+  function csvSourceRecordId(period, row) {
+    const basis = [
+      period,
+      row.date || "",
+      String(row.amount),
+      row.description || "",
+      row.counterparty || "",
+      row.account || ""
+    ].join("|");
+    const hash = crypto.createHash("sha256").update(basis).digest("hex").slice(0, 16);
+    const occurrence = (seenRowKeys.get(hash) || 0) + 1;
+    seenRowKeys.set(hash, occurrence);
+    return occurrence === 1 ? `csv:${hash}` : `csv:${hash}:${occurrence}`;
+  }
+
   const transactions = [];
 
   records.forEach((row, index) => {
@@ -114,13 +155,46 @@ function parseFinancialCsv({ csvText, period, businessName, currentCashBalance }
       return;
     }
 
-    transactions.push({
+    const normalized = {
       date,
       account: map.account ? (row[map.account] || "Main Bank") : "Main Bank",
       amount,
       description: map.description ? (row[map.description] || "") : "",
-      counterparty: map.counterparty ? (row[map.counterparty] || "Unmapped") : "Unmapped"
-    });
+      // JOB 7: an unattributed row stays UNATTRIBUTED. This previously became a
+      // counterparty literally named "Unmapped", which the concentration
+      // calculator then treated as a real vendor — the same fabricated-party
+      // pattern the audit found in buildCustomerSummary. Null means "we do not
+      // know who this was", and the engine reports it as unattributed rather
+      // than inventing a relationship.
+      counterparty: (map.counterparty && String(row[map.counterparty] || "").trim())
+        ? String(row[map.counterparty]).trim()
+        : null,
+      // Preserved verbatim, never defaulted. A row with no currency column is
+      // UNLABELLED, which the engine treats differently from a declared one.
+      currency: map.currency && row[map.currency]
+        ? String(row[map.currency]).trim().toUpperCase().slice(0, 3)
+        : null,
+      // EXPLICIT DIRECTION (JOB 7 bug fix).
+      //
+      // This importer follows the BANK-STATEMENT convention: a credit (money
+      // arriving) is positive, a debit is negative — see the inflow/outflow sums
+      // below, which have always read it that way.
+      //
+      // The engine's fallback, used for records that state no direction, is the
+      // OPPOSITE: it treats a positive amount as an outflow. The two conventions
+      // silently disagreed, so for every CSV upload the vendor-concentration
+      // metric was computed over customers and the customer metric over vendors.
+      //
+      // The fix is not to pick a winner but to stop inferring: the source knows
+      // its own convention, so it states it, and the engine never has to guess.
+      direction: amount > 0 ? "inflow" : "outflow"
+    };
+    transactions.push(Object.assign({
+      // Provenance: every normalized record must be citable by a finding.
+      sourceSystem: "csv-upload",
+      sourceRecordId: csvSourceRecordId(period, normalized),
+      recordType: "other"
+    }, normalized));
   });
 
   if (!transactions.length) {
@@ -130,7 +204,22 @@ function parseFinancialCsv({ csvText, period, businessName, currentCashBalance }
   const inflow = transactions.filter((t) => t.amount > 0).reduce((sum, t) => sum + t.amount, 0);
   const outflow = Math.abs(transactions.filter((t) => t.amount < 0).reduce((sum, t) => sum + t.amount, 0));
   const netIncome = inflow - outflow;
-  const cashAndEquivalents = currentCashBalance != null && currentCashBalance !== ""
+  /* CASH BALANCE: OBSERVED OR DERIVED — and the difference is recorded.
+   *
+   * THE DEFECT. When the uploader supplies no cash balance, this falls back to
+   * `Math.max(0, netIncome)` and writes it into the balance sheet
+   * INDISTINGUISHABLY from a figure the user actually gave us. Two things go
+   * wrong. The cash-runway calculation then treats a guess as an observation.
+   * And for a period with more outflow than inflow the derivation clamps to
+   * ZERO — so a business that never told us its balance is recorded as having
+   * no cash at all, which is a statement about their solvency that nobody made.
+   *
+   * The fallback is kept (removing it would change every existing analysis),
+   * but its PROVENANCE now travels with it, so a consumer can tell an observed
+   * balance from a derived one and a persisted run can record which it was. */
+  const cashProvided = currentCashBalance != null && currentCashBalance !== ""
+    && Number.isFinite(toNumber(currentCashBalance));
+  const cashAndEquivalents = cashProvided
     ? toNumber(currentCashBalance)
     : Math.max(0, netIncome);
 
@@ -143,13 +232,33 @@ function parseFinancialCsv({ csvText, period, businessName, currentCashBalance }
     statements: {
       cashFlow: { inflow: Math.round(inflow), outflow: Math.round(outflow) },
       profitAndLoss: { netIncome: Math.round(netIncome) },
-      balanceSheet: { cashAndEquivalents: Math.round(cashAndEquivalents) }
+      balanceSheet: {
+        cashAndEquivalents: Math.round(cashAndEquivalents),
+        /* THE BASIS TRAVELS WITH THE FIGURE, into the domain.
+           The engine must be able to tell an observed cash position from an
+           estimate inferred from net income, because the two are not
+           interchangeable for a runway calculation. Carrying it here (rather
+           than only in meta) means the calculator sees it without ingestion
+           having to reach into the engine, and without the engine learning
+           anything about where data came from. */
+        cashAndEquivalentsBasis: cashProvided ? "observed" : "derived_from_net_income"
+      }
     },
     meta: {
       source: "csv-upload",
       rowCount: transactions.length,
       skippedRows: skipped.length,
-      importedAt: new Date().toISOString()
+      importedAt: new Date().toISOString(),
+      /* THE PROVENANCE OF THE CASH BALANCE. "observed" means the uploader gave
+         us the figure; "derived_from_net_income" means we inferred it and the
+         value is an estimate, not a measurement. Persisted with the run so a
+         recovered analysis still knows which it was -- a derived figure must
+         never come back looking like an observed one. */
+      cashBalance: {
+        basis: cashProvided ? "observed" : "derived_from_net_income",
+        providedValue: cashProvided ? toNumber(currentCashBalance) : null,
+        value: Math.round(cashAndEquivalents)
+      }
     }
   };
 }

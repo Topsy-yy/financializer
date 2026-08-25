@@ -1,3 +1,21 @@
+/**
+ * Runway, stated honestly.
+ *
+ * JOB 6: the engine no longer substitutes a 12-month runway when it cannot be
+ * computed, so this sentence must distinguish three real cases — measured,
+ * not burning cash, and not measurable. Previously an unmeasurable runway
+ * printed "Estimated runway is 12 months", which read as a solvent year.
+ */
+function runwayLine(cashFlowRisk) {
+  if (cashFlowRisk.runwayMonths != null) {
+    return `Estimated runway is ${cashFlowRisk.runwayMonths} months based on current burn trends.`;
+  }
+  if (cashFlowRisk.neverDepletes) {
+    return "Cash is not being depleted at the current run-rate, so there is no runway limit to report.";
+  }
+  return "Runway could not be calculated for this period: a cash balance and a burn rate are both required.";
+}
+
 function buildPlainLanguageSummary({ businessName, period, analysis }) {
   const { cashFlowRisk, detections, earlyWarnings } = analysis;
 
@@ -20,7 +38,7 @@ function buildPlainLanguageSummary({ businessName, period, analysis }) {
     headline: `${businessName}: ${period || "Current month"} financial health is ${severityText} risk`,
     founderSummary: [
       `Your estimated cash flow risk score is ${cashFlowRisk.riskScore}/100 (${cashFlowRisk.severity} risk).`,
-      `Estimated runway is ${cashFlowRisk.runwayMonths ?? "unknown"} months based on current burn trends.`,
+      runwayLine(cashFlowRisk),
       `We detected ${issueCount} issues that need review before next investor update.`
     ],
     warnings: earlyWarnings

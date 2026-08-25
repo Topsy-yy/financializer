@@ -1,5 +1,6 @@
 const config = require("../config");
-const { getSkillContextForPage } = require("./skillsManifest");
+const { logger } = require("./logger");
+const log = logger.child({ component: "ai-transport" });
 
 const ANTHROPIC_BASE_URL = "https://api.anthropic.com";
 const ANTHROPIC_VERSION = "2023-06-01";
@@ -64,113 +65,50 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
-function buildChatPrompt(input) {
-  // `context` is this month's already-computed health/cashflow/revenue/anomalies/
-  // vendors/customers/actions -- whether computed by the AI (skills-driven) or,
-  // when no AI key is configured, by the deterministic fallback engine. Either
-  // way it is ground truth for chat: never recompute or contradict it here.
-  const context = input.context || {};
-  const contextPayload = {
-    month: input.month,
-    assistant: input.assistant,
-    provider: input.provider,
-    health: context.health || {},
-    cashflow: context.cashflow || {},
-    revenue: context.revenue || {},
-    anomalies: context.anomalies || {},
-    vendors: context.vendors || {},
-    customers: context.customers || {},
-    actions: context.actions || {}
-  };
+// Upper bound on line items placed in the chat prompt. Keeps token cost (and
+// latency on slow providers) predictable no matter how large a month is.
+const CHAT_MAX_TRANSACTIONS = 120;
+const CHAT_MAX_LEDGER_ROWS = 40;
 
-  const skillContext = getSkillContextForPage("chat");
-
-  return [
-    "You are FinGuard AI, the virtual financial controller described in the skill documentation below.",
-    "Read it to understand your positioning, tone, and what's expected of you before answering.",
-    "=== SKILL DOCUMENTATION ===",
-    skillContext,
-    "=== END SKILL DOCUMENTATION ===",
-    "",
-    "Answer as a financial controller for SMEs.",
-    "Base your answer on the context JSON below, which is already-computed for this month -- treat it as ground truth, do not recompute or contradict it.",
-    "If uncertain, say what additional data is needed.",
-    "Be concise, practical, and include 1-3 action points.",
-    "Do not expose secrets.",
-    "Context JSON:",
-    JSON.stringify(contextPayload),
-    "User question:",
-    input.message
-  ].join("\n");
+function compactAmount(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.round(n) : null;
+}
+function compactText(value, max) {
+  return String(value == null ? "" : value).replace(/\s+/g, " ").trim().slice(0, max || 80);
 }
 
-function buildInterpretationPrompt(input) {
-  const skillOutputs = input.skillOutputs || {};
-
-  const allSkillDocs = [
-    "overview",
-    "financial_health",
-    "cashflow",
-    "revenue",
-    "risk",
-    "vendors",
-    "customers",
-    "actions",
-    "executive_report"
-  ]
-    .map((page) => getSkillContextForPage(page))
-    .filter(Boolean);
-
-  // De-duplicate (several pages share skills like financial-controller-core).
-  const skillContext = Array.from(new Set(allSkillDocs.join("\n\n---\n\n").split("\n\n---\n\n"))).join("\n\n---\n\n");
-
-  return [
-    "You are FinGuard AI, the virtual financial controller described in the skill documentation below.",
-    "Read each skill's Purpose, Responsibilities, tone guidance, and thresholds carefully --",
-    "this defines what you are expected to detect, how to talk about it, and to whom.",
-    "",
-    "=== SKILL DOCUMENTATION ===",
-    skillContext,
-    "=== END SKILL DOCUMENTATION ===",
-    "",
-    `Business: ${input.businessName || "this business"}, period: ${input.period || "current month"}.`,
-    "",
-    "Below is this month's data, already computed by the deterministic skill engine described above.",
-    "Treat every number here as ground truth -- never recompute, contradict, or invent figures not present in it.",
-    "Your job is ONLY to narrate and explain it, per the executive-report-generator tone guidelines",
-    "(plain English, lead with impact, be specific with names/amounts, honest but constructive, calibrated urgency).",
-    "",
-    "Skill output data:",
-    JSON.stringify(skillOutputs),
-    "",
-    "Return STRICT JSON only, matching this schema exactly:",
-    "{",
-    '  "overall_summary": "2-3 sentence founder-friendly summary",',
-    '  "overall_risk_level": "low|medium|high",',
-    '  "pages": {',
-    '    "financial_health": { "narrative": "...", "key_findings": ["..."] },',
-    '    "cashflow": { "narrative": "...", "key_findings": ["..."], "recommended_actions": ["..."] },',
-    '    "revenue": { "narrative": "...", "key_findings": ["..."] },',
-    '    "risk": { "narrative": "...", "key_findings": ["..."] },',
-    '    "vendors": { "narrative": "...", "key_findings": ["..."] },',
-    '    "customers": { "narrative": "...", "key_findings": ["..."] },',
-    '    "actions": { "recommended_actions": ["..."] }',
-    "  },",
-    '  "executive_report": {',
-    '    "executive_summary": "...",',
-    '    "key_insights": ["..."],',
-    '    "what_is_working": ["..."],',
-    '    "what_needs_attention": ["..."],',
-    '    "priority_actions": [{ "rank": 1, "action": "...", "why": "..." }]',
-    "  }",
-    "}",
-    "Rules:",
-    "- Never claim confirmed fraud; use indicator language only (per fraud-and-errors-detector positioning).",
-    "- Name specific customers/vendors/amounts when present in the data above.",
-    "- Keep every array to a maximum of 6 items.",
-    "- Keep each narrative to 2-3 sentences.",
-    "- If a section's underlying data is empty/absent, say so briefly rather than inventing content."
+/**
+ * Ask a cheap/free model (NVIDIA by default) to turn a vague line-item question
+ * into a structured filter, which the deterministic retrieval layer then
+ * executes. This runs ONLY when code-based parsing found no concrete filter, so
+ * the common cases stay instant and this never adds latency to them.
+ *
+ * The output is a tiny JSON object, so the call is short in both directions.
+ */
+async function extractTransactionFilter({ apiKey, provider, message, parties, period }) {
+  if (!apiKey) return null;
+  const prompt = [
+    "Convert the user's question about financial records into a JSON filter.",
+    "Respond with ONLY a JSON object, no prose, using any of these optional keys:",
+    '{"day":<1-31>,"date":"YYYY-MM-DD","parties":["exact name from the list"],"text":"keyword",',
+    ' "minAmount":<number>,"rank":"desc"|"asc","limit":<1-20>,"wantReceivables":true,"wantPayables":true}',
+    "Omit keys that do not apply. Use {} if the question is not about specific records.",
+    "Only use party names from this list: " + JSON.stringify((parties || []).slice(0, 60)),
+    "The period being discussed is " + (period || "the current month") + ".",
+    "Question: " + message
   ].join("\n");
+
+  const completion = await callChatCompletions({
+    apiKey,
+    provider: provider || "nvidia",
+    prompt,
+    temperature: 0,
+    maxTokens: 200
+  });
+  if (!completion.ok || !completion.text) return null;
+  const parsed = parseJsonMaybe(completion.text);
+  return parsed && typeof parsed === "object" ? parsed : null;
 }
 
 function extractTextFromCompletion(data) {
@@ -265,15 +203,88 @@ function parseJsonMaybe(text) {
   }
 }
 
+// Resolve the effective abort timeout. When config.aiApiTimeoutMs is 0 (the
+// default) the timeout is disabled entirely — even a per-call override is
+// ignored — so the AI controller never aborts a slow-but-valid response and
+// falls back to the rule-based report. Set AI_API_TIMEOUT_MS > 0 to re-enable.
+function resolveTimeoutMs(override) {
+  const base = toNumber(config.aiApiTimeoutMs, 0);
+  if (base <= 0) return 0; // disabled globally -> no timeout at all
+  return override && override > 0 ? override : base;
+}
+
+// Create an abort signal that fires after `timeoutMs`, or no signal at all when
+// the timeout is disabled (timeoutMs = 0). `clear()` is always safe to call.
+function makeAbort(timeoutMs) {
+  if (!timeoutMs) return { signal: undefined, clear: function () {} };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return { signal: controller.signal, clear: function () { clearTimeout(timer); } };
+}
+
+// Transient network faults that are worth retrying. These are connection-level
+// failures (the request never reached the provider), not provider rejections —
+// retrying an auth/quota error would be pointless, so those are excluded.
+const RETRYABLE_NETWORK_CODES = new Set([
+  "UND_ERR_CONNECT_TIMEOUT",  // TCP connect timed out (flaky route / IPv6 stall)
+  "UND_ERR_SOCKET",           // socket closed mid-flight
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "EAI_AGAIN",                // transient DNS failure
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+  "EPIPE"
+]);
+
+function networkErrorCode(error) {
+  const cause = error && error.cause;
+  return (cause && (cause.code || cause.name)) || error.code || "";
+}
+function isRetryableNetworkError(error) {
+  if (!error || error.name === "AbortError") return false; // a real timeout, not transient
+  return RETRYABLE_NETWORK_CODES.has(networkErrorCode(error));
+}
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * fetch() that transparently retries transient connection failures.
+ *
+ * Intermittent UND_ERR_CONNECT_TIMEOUT is the common failure mode on networks
+ * with a flaky IPv6 route: the same request succeeds moments later. Rather than
+ * surfacing that to the user as "couldn't reach the AI", retry a few times with
+ * exponential backoff so a working connection is almost always found.
+ *
+ * Attempts are controlled by AI_NETWORK_RETRIES (default 3 total attempts).
+ */
+async function fetchWithRetry(endpoint, options, label) {
+  const attempts = Math.max(1, toNumber(config.aiNetworkRetries, 3));
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await fetch(endpoint, options);
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableNetworkError(error) || attempt === attempts) break;
+      const backoffMs = 400 * Math.pow(2, attempt - 1); // 400ms, 800ms, 1600ms…
+      log.warn(
+        `[AI] ${label} connection failed (${networkErrorCode(error)}) — retrying ${attempt}/${attempts - 1} in ${backoffMs}ms`
+      );
+      await sleep(backoffMs);
+    }
+  }
+  throw lastError;
+}
+
 async function callOpenAiCompatible({ apiKey, provider, prompt, temperature, baseUrlOverride, modelOverride, timeoutMsOverride, maxTokens }) {
   const model = modelOverride || config.aiApiModel || "gpt-5-mini";
   const endpoint = buildEndpoint(baseUrlOverride || config.aiApiBaseUrl);
-  const controller = new AbortController();
-  const timeoutMs = timeoutMsOverride || clamp(toNumber(config.aiApiTimeoutMs, 15000), 3000, 60000);
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const { signal, clear } = makeAbort(resolveTimeoutMs(timeoutMsOverride));
 
   try {
-    const res = await fetch(endpoint, {
+    const res = await fetchWithRetry(endpoint, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -288,8 +299,8 @@ async function callOpenAiCompatible({ apiKey, provider, prompt, temperature, bas
           { role: "user", content: prompt }
         ]
       }),
-      signal: controller.signal
-    });
+      signal: signal
+    }, provider || "openai");
 
     if (!res.ok) {
       const errorText = await res.text();
@@ -299,6 +310,13 @@ async function callOpenAiCompatible({ apiKey, provider, prompt, temperature, bas
     const data = await res.json();
     return { ok: true, text: extractTextFromCompletion(data), provider: provider || "openai", model };
   } catch (error) {
+    // Surface the real network cause (proxy, DNS, TLS, reset) — this is what the
+    // "Could not reach the AI provider" fallback hides from the UI.
+    log.error(
+      `[AI] ${provider || "openai"} request to ${endpoint} failed:`,
+      error.name, "-", error.message,
+      error.cause ? "| cause: " + (error.cause.code || error.cause.message || error.cause) : ""
+    );
     return {
       ok: false,
       reason: error.name === "AbortError" ? "timeout" : "request_failed",
@@ -307,17 +325,16 @@ async function callOpenAiCompatible({ apiKey, provider, prompt, temperature, bas
       model
     };
   } finally {
-    clearTimeout(timeout);
+    clear();
   }
 }
 
 async function callAnthropic({ apiKey, prompt, temperature, maxTokens }) {
   const model = ANTHROPIC_DEFAULT_MODEL;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), clamp(toNumber(config.aiApiTimeoutMs, 15000), 3000, 60000));
+  const { signal, clear } = makeAbort(resolveTimeoutMs());
 
   try {
-    const res = await fetch(`${ANTHROPIC_BASE_URL}/v1/messages`, {
+    const res = await fetchWithRetry(`${ANTHROPIC_BASE_URL}/v1/messages`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -331,8 +348,8 @@ async function callAnthropic({ apiKey, prompt, temperature, maxTokens }) {
         system: SYSTEM_PROMPT,
         messages: [{ role: "user", content: prompt }]
       }),
-      signal: controller.signal
-    });
+      signal: signal
+    }, "anthropic");
 
     if (!res.ok) {
       const errorText = await res.text();
@@ -351,17 +368,16 @@ async function callAnthropic({ apiKey, prompt, temperature, maxTokens }) {
       model
     };
   } finally {
-    clearTimeout(timeout);
+    clear();
   }
 }
 
 async function callGemini({ apiKey, prompt, temperature, maxTokens }) {
   const model = GEMINI_DEFAULT_MODEL;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), clamp(toNumber(config.aiApiTimeoutMs, 15000), 3000, 60000));
+  const { signal, clear } = makeAbort(resolveTimeoutMs());
 
   try {
-    const res = await fetch(`${GEMINI_BASE_URL}/models/${model}:generateContent`, {
+    const res = await fetchWithRetry(`${GEMINI_BASE_URL}/models/${model}:generateContent`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -372,8 +388,8 @@ async function callGemini({ apiKey, prompt, temperature, maxTokens }) {
         contents: [{ role: "user", parts: [{ text: prompt }] }],
         generationConfig: { temperature, maxOutputTokens: maxTokens || 1024 }
       }),
-      signal: controller.signal
-    });
+      signal: signal
+    }, "google");
 
     if (!res.ok) {
       const errorText = await res.text();
@@ -394,7 +410,7 @@ async function callGemini({ apiKey, prompt, temperature, maxTokens }) {
       model
     };
   } finally {
-    clearTimeout(timeout);
+    clear();
   }
 }
 
@@ -429,8 +445,8 @@ async function callChatCompletions({ apiKey, provider, prompt, temperature = 0.2
   if (normalizedProvider === "mistral") {
     // Mistral's API is OpenAI-compatible (Bearer auth, /chat/completions shape),
     // so it reuses the same client with a base URL + model override.
-    // Mistral Large on the free Experiment tier is slower to respond, so it
-    // gets a longer timeout than the 15s default to avoid premature aborts.
+    // (timeoutMsOverride only applies if AI_API_TIMEOUT_MS is re-enabled; by
+    // default the timeout is off so slow responses aren't aborted.)
     return callOpenAiCompatible({
       apiKey,
       provider,
@@ -459,8 +475,9 @@ async function callChatCompletions({ apiKey, provider, prompt, temperature = 0.2
     // NVIDIA NIM (build.nvidia.com) is also OpenAI-compatible, and offers a
     // free-credits tier that doesn't require billing to be set up first.
     // Its shared free-tier infra is measurably slower than a dedicated
-    // provider (~15 tokens/sec observed), so it gets a longer timeout and a
-    // tighter max_tokens cap than other providers to keep latency reasonable.
+    // provider (~15 tokens/sec observed), so it keeps a tighter max_tokens cap.
+    // The timeout is disabled by default (see resolveTimeoutMs) so a slow NVIDIA
+    // response completes instead of aborting to the rule-based report.
     return callOpenAiCompatible({
       apiKey,
       provider,
@@ -476,79 +493,41 @@ async function callChatCompletions({ apiKey, provider, prompt, temperature = 0.2
   return callOpenAiCompatible({ apiKey, provider, prompt, temperature, maxTokens });
 }
 
-async function generateAiChatResponse({ apiKey, provider, assistant, month, context, message }) {
-  const prompt = buildChatPrompt({ provider, assistant, month, context, message });
-  const completion = await callChatCompletions({ apiKey, provider, prompt, temperature: 0.35, assistant });
-
-  if (!completion.ok) return completion;
-
-  return {
-    ok: true,
-    provider: completion.provider,
-    model: completion.model,
-    text: completion.text.trim()
-  };
-}
-
-function clip(arr, n) {
-  return Array.isArray(arr) ? arr.slice(0, n) : [];
-}
-
-function normalizePageNarrative(page) {
-  return {
-    narrative: String((page && page.narrative) || "").trim(),
-    key_findings: clip(page && page.key_findings, 6),
-    recommended_actions: clip(page && page.recommended_actions, 6)
-  };
-}
-
 /**
- * The deterministic skill engine (riskEngine.js + api.js) has already computed
- * every number for this month. The AI's only job here is to read those numbers
- * plus the skill docs and produce founder-facing narrative, key findings, and
- * an executive report -- never to recompute or contradict the figures.
+ * TEST-ONLY provider stub.
+ *
+ * Lets the HTTP suite exercise the real request path — route, orchestrator,
+ * context builder, validator — without a network call, which is the only way to
+ * prove that a fabricated answer is blocked AT THE ROUTE rather than merely in
+ * a unit test.
+ *
+ * Doubly gated: it does nothing unless BOTH NODE_ENV === "test" and the
+ * AI_TEST_PROVIDER flag are set, so it cannot be reached in a deployed
+ * environment even if the flag were set by accident.
  */
-async function generateAiInterpretation({ apiKey, provider, assistant, businessName, period, skillOutputs }) {
-  const prompt = buildInterpretationPrompt({ businessName, period, skillOutputs });
-  const completion = await callChatCompletions({ apiKey, provider, prompt, temperature: 0.15, maxTokens: 3072, assistant });
-
-  if (!completion.ok) return completion;
-
-  const parsed = parseJsonMaybe(completion.text);
-  if (!parsed) {
-    return { ok: false, reason: "unparseable_response", detail: completion.text, provider: completion.provider, model: completion.model };
-  }
-
-  const pages = parsed.pages || {};
-
-  return {
-    ok: true,
-    provider: completion.provider,
-    model: completion.model,
-    output: {
-      overall_summary: String(parsed.overall_summary || "").trim(),
-      overall_risk_level: String(parsed.overall_risk_level || "medium").toLowerCase(),
-      pages: {
-        financial_health: normalizePageNarrative(pages.financial_health),
-        cashflow: normalizePageNarrative(pages.cashflow),
-        revenue: normalizePageNarrative(pages.revenue),
-        risk: normalizePageNarrative(pages.risk),
-        vendors: normalizePageNarrative(pages.vendors),
-        customers: normalizePageNarrative(pages.customers),
-        actions: normalizePageNarrative(pages.actions)
-      },
-      executive_report: {
-        executive_summary: String((parsed.executive_report && parsed.executive_report.executive_summary) || "").trim(),
-        key_insights: clip(parsed.executive_report && parsed.executive_report.key_insights, 6),
-        what_is_working: clip(parsed.executive_report && parsed.executive_report.what_is_working, 6),
-        what_needs_attention: clip(parsed.executive_report && parsed.executive_report.what_needs_attention, 6),
-        priority_actions: clip(parsed.executive_report && parsed.executive_report.priority_actions, 6)
-      }
-    }
-  };
+let testStub = null;
+function isTestStubEnabled() {
+  return process.env.NODE_ENV === "test" && process.env.AI_TEST_PROVIDER === "1";
+}
+function setTestStub(next) {
+  if (!isTestStubEnabled()) return false;
+  testStub = next;
+  return true;
 }
 
 module.exports = {
-  generateAiChatResponse,
-  generateAiInterpretation
+  extractTransactionFilter,
+  // JOB 8: the transport, exposed so src/ai/providers/adapter.js can own the
+  // boundary while the provider-specific HTTP code stays here. Everything above
+  // the adapter is provider-agnostic; this is the seam between the two.
+  callProvider: async function callProviderWithStub(args) {
+    if (isTestStubEnabled() && testStub) {
+      if (testStub.fail) return { ok: false, reason: testStub.fail, provider: args.provider };
+      return { ok: true, text: testStub.text || "", provider: args.provider, model: "test-stub" };
+    }
+    return callChatCompletions(args);
+  },
+  setTestStub,
+  isTestStubEnabled,
+  classifyProviderError
 };

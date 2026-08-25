@@ -6,6 +6,25 @@ dependencies: node>=18
 
 # Financial Health Scorer
 
+## Methodology
+
+> **This document is NOT the source of truth for any number.**
+>
+> Every threshold, weight, severity, confidence value and score band this skill
+> refers to is defined in the authoritative rules registry at
+> `src/domain/rules/registry.js` and is applied by the deterministic engine.
+> The generated, always-current statement of that methodology is available at
+> `GET /api/methodology` (and rendered from `src/domain/rules/methodology.js`).
+>
+> This file previously restated those numbers, and they had drifted from the
+> code. Because these files are loaded into the AI's system prompt at runtime,
+> the drift meant the model was being instructed with figures the engine does
+> not use. The numbers have therefore been removed rather than corrected: a
+> hand-maintained copy will drift again.
+>
+> **The deterministic engine decides. This skill explains what the engine
+> decided, in language a business owner can act on.**
+
 ## Purpose
 
 Convert findings from all analysis skills into a single executive-level financial health assessment.
@@ -69,63 +88,33 @@ Creates the **dashboard headline metric** — a single number (0–100) that tel
   "summary": "Business is operationally stable but faces concentration risks in both vendors and customers that could amplify cash flow pressure.",
   "components": {
     "cashflow_health": {
-      "weight": 0.30,
+      "weight": "<from registry>",
       "raw_score": 55,
       "weighted_contribution": 16.5
     },
     "fraud_risk": {
-      "weight": 0.20,
+      "weight": "<from registry>",
       "raw_score": 65,
       "weighted_contribution": 13.0
     },
     "revenue_health": {
-      "weight": 0.20,
+      "weight": "<from registry>",
       "raw_score": 88,
       "weighted_contribution": 17.6
     },
     "vendor_health": {
-      "weight": 0.15,
+      "weight": "<from registry>",
       "raw_score": 35,
       "weighted_contribution": 5.25
     },
     "customer_health": {
-      "weight": 0.15,
+      "weight": "<from registry>",
       "raw_score": 28,
       "weighted_contribution": 4.2
     }
   }
 }
 ```
-
-## Scoring Formula
-
-### Component Weights
-
-| Component | Weight | Source Skill |
-|---|---|---|
-| Cash Flow Health | 30% | cashflow-risk-analyzer |
-| Fraud & Error Risk | 20% | fraud-and-errors-detector |
-| Revenue Health | 20% | revenue-intelligence |
-| Vendor Health | 15% | vendor-dependency-detector |
-| Customer Health | 15% | customer-concentration-detector |
-
-### Calculation
-
-```
-overall_score = Σ (component_score × weight)
-```
-
-Each component score is derived as `100 - risk_score` from its source skill. The result is clamped to `[0, 100]`.
-
-### Risk Category Classification
-
-| Score Range | Category | Dashboard Color |
-|---|---|---|
-| 80–100 | Excellent | 🟢 Emerald |
-| 60–79 | Good | 🟢 Emerald |
-| 40–59 | Fair | 🟠 Amber |
-| 20–39 | Poor | 🔴 Red |
-| 0–19 | Critical | 🔴 Red |
 
 ## Dashboard Mapping
 

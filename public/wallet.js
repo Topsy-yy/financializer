@@ -5,6 +5,17 @@
    sign-in messages and contract deployments alike.
    ═══════════════════════════════════════════════════════════════ */
 
+/**
+ * The CSRF token this server issued, read from its readable cookie.
+ *
+ * Duplicated from app.js deliberately: wallet.js is loaded independently on
+ * pages that do not include app.js, so it cannot rely on that helper existing.
+ */
+function walletCsrfToken() {
+  var match = String(document.cookie || "").match(/(?:^|;\s*)fg_csrf=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
 var FinGuardWallet = (function () {
   var state = {
     address: null,
@@ -118,7 +129,9 @@ var FinGuardWallet = (function () {
 
     var verifyRes = await fetch("/api/wallet/verify", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      // The CSRF token is required on every state-changing request. This file
+      // has no shared helper, so the cookie is read inline.
+      headers: { "Content-Type": "application/json", "x-csrf-token": walletCsrfToken() },
       body: JSON.stringify({ address: state.address, signature: signature, chainId: state.chainId })
     });
     var verifyData = await verifyRes.json();
