@@ -121,7 +121,9 @@ function timestamp() {
  * Returns `pending` on success — never `successful`. The prompt has been
  * queued; nothing has been paid.
  */
-async function initiatePayment({ amount, reference, payerReference, description }) {
+async function initiatePayment({
+  amount, reference, payerReference, description, accountReference
+}) {
   const c = config();
   const phone = normalizePhone(payerReference);
   if (!phone) {
@@ -150,9 +152,13 @@ async function initiatePayment({ amount, reference, payerReference, description 
         PartyB: c.shortcode,
         PhoneNumber: phone,
         CallBackURL: c.callbackUrl,
-        // Our own id, echoed back in the callback for correlation.
-        AccountReference: String(reference).slice(0, 12),
-        TransactionDesc: String(description || "FinGuard subscription").slice(0, 13)
+        /* WHAT THE CUSTOMER READS ON THE PROMPT, and on their M-Pesa statement
+           afterwards. Correlation does NOT depend on this — settlement matches
+           on Safaricom's CheckoutRequestID — so it carries a readable label
+           rather than our payment id. `reference` remains the fallback so an
+           adapter call that supplies no label still sends something unique. */
+        AccountReference: String(accountReference || reference).slice(0, 12),
+        TransactionDesc: String(description || "Subscription").slice(0, 13)
       })
     });
     const body = await res.json().catch(() => ({}));
@@ -162,7 +168,14 @@ async function initiatePayment({ amount, reference, payerReference, description 
       return {
         ok: false,
         status: PAYMENT_STATUS.FAILED,
-        detail: body.errorMessage || body.ResponseDescription || "M-Pesa rejected the request.",
+        /* REDACTED. Daraja echoes credential material in `errorMessage` —
+           "Bad Request - Invalid Passkey <passkey>" is a real response — and
+           this string is returned to the caller and rendered in the UI. The
+           stored `raw` below was already redacted; this was not, so the
+           passkey left the server through the one field a user actually
+           reads. */
+        detail: redact(body.errorMessage || body.ResponseDescription
+          || "M-Pesa rejected the request."),
         raw: JSON.parse(redact(body))
       };
     }
@@ -213,12 +226,24 @@ async function verifyPayment({ providerRef }) {
  * Anything else is a genuine failure.
  */
 function statusFromResultCode(code) {
+  /* AN ABSENT CODE IS NOT A ZERO.
+     `Number(null)`, `Number("")` and `Number(false)` are all 0, so a payload
+     carrying `ResultCode: null` — exactly what a JSON field explicitly set to
+     null gives you — was read as ResultCode 0 and reported as a COMPLETED
+     PAYMENT. Through the callback route that is an activation derived from no
+     evidence at all, and the R5 re-query could not catch it because the query
+     response would be mis-read the same way. Only a value that is genuinely a
+     number, or a string that spells one, is a result code. */
+  if (typeof code !== "number" && typeof code !== "string") return PAYMENT_STATUS.PENDING;
+  if (typeof code === "string" && code.trim() === "") return PAYMENT_STATUS.PENDING;
+
   const n = Number(code);
+  if (!Number.isFinite(n)) return PAYMENT_STATUS.PENDING;
+
   if (n === 0) return PAYMENT_STATUS.SUCCESSFUL;
   if (n === 1032) return PAYMENT_STATUS.CANCELLED;
   if (n === 1037) return PAYMENT_STATUS.EXPIRED;
-  if (Number.isFinite(n)) return PAYMENT_STATUS.FAILED;
-  return PAYMENT_STATUS.PENDING;
+  return PAYMENT_STATUS.FAILED;
 }
 
 /**

@@ -10,6 +10,7 @@ const capabilities = require("../../src/ai/capabilities");
 const claimValidator = require("../../src/ai/validation/claimValidator");
 const redaction = require("../../src/ai/context/redaction");
 const legacy = require("../../src/services/aiAnalysisClient");
+const entitlements = require("../../src/services/entitlements");
 const engine = require("../../src/domain/analysis/engine");
 const { scenarios } = require("../helpers/fixtures");
 
@@ -17,8 +18,7 @@ const NOW = Date.parse("2026-06-15T00:00:00Z");
 const CONFIG = { enableAiAnalysis: true, nvidiaApiKey: "managed-key", mistralAppKey: "m" };
 
 function currentPeriod() {
-  const d = new Date();
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+  return entitlements.currentPeriod();
 }
 const profile = (extra = {}) => Object.assign(
   { plan: "starter", credits: 1000, creditsPeriod: currentPeriod(), aiAssistant: "controller-core" },

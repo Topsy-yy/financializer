@@ -22,6 +22,7 @@ const orchestrator = require("../../src/ai/orchestrator");
 const copilot = require("../../src/ai/copilot/copilot");
 const copilotStore = require("../../src/ai/copilot/store");
 const legacy = require("../../src/services/aiAnalysisClient");
+const entitlements = require("../../src/services/entitlements");
 const engine = require("../../src/domain/analysis/engine");
 const { scenarios } = require("../helpers/fixtures");
 
@@ -29,8 +30,7 @@ const NOW = Date.parse("2026-06-15T00:00:00Z");
 const CONFIG = { enableAiAnalysis: true, nvidiaApiKey: "managed-key" };
 
 function currentPeriod() {
-  const d = new Date();
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+  return entitlements.currentPeriod();
 }
 const profile = (extra = {}) => Object.assign(
   { plan: "starter", credits: 1000, creditsPeriod: currentPeriod(), aiAssistant: "controller-core" },

@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════
-   FinGuard AI — Application Logic
+   FinGuard — Application Logic
    Premium Dark Dashboard SPA
    ═══════════════════════════════════════════════════════════════ */
 
@@ -214,8 +214,74 @@ function scoreBarClass(score) {
 
 var MAX_VISIBLE_TOASTS = 3;
 
+var USER_ERROR_MESSAGES = {
+  internal_error: 'Something went wrong on our side. Please try again.',
+  invalid_period: 'Please choose a valid month and try again.',
+  no_data_source: 'No financial source is connected yet. Connect one or upload files first.',
+  zoho_fetch_failed: 'We could not fetch your latest records. Please reconnect and try again.',
+  persistence_unavailable: 'Your data service is temporarily unavailable. Please try again shortly.',
+  records_unavailable: 'We could not load these records right now. Please try again.',
+  analysis_unavailable: 'We could not load this analysis right now. Please try again.',
+  analysis_index_unavailable: 'We could not load saved analyses right now. Please try again.',
+  no_completed_analysis: 'No completed analysis was found for this period yet.',
+  no_such_run: 'This saved analysis could not be found anymore.',
+  no_such_record: 'This record could not be found anymore.',
+  no_such_finding: 'This finding could not be found anymore.',
+  legacy_unrecoverable: 'This historical analysis cannot be reloaded. Please run a fresh monthly review.',
+  billing_unavailable: 'Billing is temporarily unavailable. Please try again later.',
+  payment_unavailable: 'Online payment is not available at the moment. Please contact support.',
+  payment_initiation_failed: 'We could not start your payment. Please try again.',
+  no_such_payment: 'That payment request could not be found.',
+  phone_required: 'Please enter a phone number to continue.',
+  checkout_failed: 'We could not complete checkout. Please try again.',
+  mail_not_configured: 'Email delivery is not available right now.',
+  email_failed: 'We could not send this email. Please try again.',
+  no_recipient: 'Please enter at least one recipient email address.',
+  no_report: 'Please run a monthly review before doing this action.',
+  csrf_token_missing: 'Your session expired. Please refresh the page and try again.',
+  csrf_token_invalid: 'Your session could not be verified. Please refresh and try again.',
+  rate_limited: 'Too many requests in a short time. Please wait a moment and try again.',
+  upgrade_required: 'This feature is not included in your current plan yet.',
+  forbidden: 'You do not have permission to perform this action.',
+  entitlements_unavailable: 'Plan details are temporarily unavailable. Please try again.',
+  plan_not_purchasable: 'This plan is currently unavailable for purchase.',
+  connection_error: 'Connection issue detected. Please check your network and try again.'
+};
+
+function sanitizeTechTerms(text) {
+  return String(text || '')
+    .replace(/\baccess key\b/gi, 'access key')
+    .replace(/\bOAuth\b/g, 'secure sign-in')
+    .replace(/\bCSRF\b/g, 'security check')
+    .replace(/\bprovider\b/gi, 'service')
+    .replace(/\bmodel\b/gi, 'assistant mode')
+    .replace(/\bBYOK\b/g, 'custom key mode')
+    .replace(/\bOpenAI\b|\bAnthropic\b|\bGemini\b|\bMistral\b|\bNVIDIA\b|\bxAI\b|\bDeepSeek\b|\bAzure OpenAI\b/g, 'connected service')
+    .replace(/\bAI\b/g, 'smart')
+    .replace(/smart smart/g, 'smart');
+}
+
+function humanizeErrorCode(code) {
+  if (!code) return '';
+  return String(code)
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, function (m) { return m.toUpperCase(); });
+}
+
+function resolveUserError(payload, fallback) {
+  var errorCode = payload && payload.error ? String(payload.error) : '';
+  var detail = payload && payload.detail ? String(payload.detail) : '';
+  var message = payload && payload.message ? String(payload.message) : '';
+  if (errorCode && USER_ERROR_MESSAGES[errorCode]) return USER_ERROR_MESSAGES[errorCode];
+  if (detail) return sanitizeTechTerms(detail);
+  if (message) return sanitizeTechTerms(message);
+  if (errorCode) return humanizeErrorCode(errorCode) + '.';
+  return fallback || 'Something went wrong. Please try again.';
+}
+
 function showToast(message, type) {
   type = type || 'info';
+  message = sanitizeTechTerms(message);
   var toast = document.createElement('div');
   toast.className = 'toast toast-' + type;
   toast.innerHTML =
@@ -242,26 +308,26 @@ function dismissToast(btn) {
    being used. 'missing_ai_api_key' is intentionally quiet -- that's just
    "no key configured yet", not a failure. */
 var AI_FAILURE_MESSAGES = {
-  rate_limited: 'Your AI provider’s rate limit or quota has been reached. Showing rule-based analysis instead.',
-  invalid_api_key: 'Your AI API key was rejected by the provider. Check it in Settings.',
-  model_not_found: 'The configured AI model is no longer available from your provider. Try a different provider in Settings, or contact your administrator.',
-  insufficient_balance: 'Your AI provider account has run out of prepaid balance. Top up your account, or switch providers in Settings.',
-  provider_unavailable: 'Your AI provider is temporarily unavailable. Showing rule-based analysis instead.',
-  unparseable_response: 'The AI returned a response we couldn’t parse. Showing rule-based analysis instead.',
-  timeout: 'The AI request timed out. Showing rule-based analysis instead.',
-  request_failed: 'Could not reach the AI provider. Showing rule-based analysis instead.',
-  ai_analysis_disabled: 'AI analysis is disabled on this server.',
-  insufficient_credits: 'You’ve used your AI credits for this month. Upgrade to Pro for more, or add your own API key in Settings. Your full analysis below is still free.',
-  managed_key_unavailable: 'The managed AI service isn’t configured on this server. Add your own API key in Settings to use AI narration.'
+  rate_limited: 'Live guidance is temporarily busy. We are showing computed insights instead.',
+  invalid_api_key: 'Your access key was not accepted. Update it in Settings and try again.',
+  model_not_found: 'The selected guidance mode is unavailable. Please choose another mode in Settings.',
+  insufficient_balance: 'Your connected service account has no remaining balance.',
+  provider_unavailable: 'Live guidance is temporarily unavailable. We are showing computed insights instead.',
+  unparseable_response: 'We could not process the guidance response. We are showing computed insights instead.',
+  timeout: 'Live guidance took too long to respond. We are showing computed insights instead.',
+  request_failed: 'We could not reach the guidance service. We are showing computed insights instead.',
+  ai_analysis_disabled: 'Live guidance is currently turned off on this server.',
+  insufficient_credits: 'You have used your guidance allowance for the current cycle. The core analysis below still works fully.',
+  managed_key_unavailable: 'Live guidance is not configured on this server yet.'
 };
 
 function notifyAiFailureIfAny(aiAnalysis) {
   if (!aiAnalysis || aiAnalysis.ok || aiAnalysis.reason === 'missing_ai_api_key' || aiAnalysis.reason === 'ai_not_requested') return;
-  var message = AI_FAILURE_MESSAGES[aiAnalysis.reason] || ('AI analysis failed (' + aiAnalysis.reason + '). Showing rule-based analysis instead.');
+  var message = AI_FAILURE_MESSAGES[aiAnalysis.reason] || ('Live guidance is unavailable right now. Showing computed insights instead.');
   showToast(message, aiAnalysis.reason === 'insufficient_credits' ? 'info' : 'warning');
 }
 
-/* ── Plan & AI credits (entitlements) ────────────────────────── */
+/* ── Plan & guidance credits (entitlements) ────────────────────────── */
 /* ── Plan features (server is authoritative; this only renders state) ──
    Premium capabilities are shown locked rather than hidden, so users discover
    them naturally while using the app. */
@@ -285,7 +351,7 @@ function productBoundary() {
   var e = appState.entitlement;
   return (e && e.product_boundary) || {
     starter: { verb: 'Explains', scope: 'Current state', role: 'Monitoring', question: 'What is happening in my business?' },
-    growth: { verb: 'Recommends', scope: 'Future decisions', role: 'AI CFO', question: 'What should I do next?' }
+    growth: { verb: 'Recommends', scope: 'Future decisions', role: 'Growth Advisor', question: 'What should I do next?' }
   };
 }
 /* Is this capability entitled but not yet built? Server-supplied, so the UI can
@@ -306,7 +372,7 @@ function upgradeMessage(feature) {
   var plan = featureRequiredPlan(feature);
   var tail = plan === 'Accountant Workspace'
     ? ' is available on the Accountant Workspace plan.'
-    : ' is available on the ' + plan + ' and Custom AI plans.';
+    : ' is available on the ' + plan + ' and Custom Guidance plans.';
   return featureCopy(feature) + tail;
 }
 function lockIcon() {
@@ -359,7 +425,7 @@ function renderUpgradeCard() {
     var names = locked.slice(0, 3).map(function(k) { return featureCopy(k); });
     text.textContent = names.length
       ? 'Unlock ' + names.join(', ') + '.'
-      : 'Unlock more of FinGuard AI.';
+      : 'Unlock more advanced guidance features.';
   }
   card.classList.remove('hidden');
 }
@@ -371,11 +437,11 @@ function renderCreditsChip() {
   if (!e) { chip.classList.add('hidden'); return; }
   chip.classList.remove('hidden');
   if (e.byok) {
-    chip.innerHTML = icon('bot') + ' Custom AI';
-    chip.title = 'Using your own API key — AI is unmetered.';
+    chip.innerHTML = icon('bot') + ' Custom Guidance';
+    chip.title = 'Using your own access key with no monthly guidance cap.';
   } else {
-    chip.innerHTML = icon('bot') + ' ' + escapeHtml(e.plan_label) + ' · ' + e.credits + ' credits';
-    chip.title = e.credits + ' of ' + e.allowance + ' AI credits left this month.';
+    chip.innerHTML = icon('bot') + ' ' + escapeHtml(e.plan_label) + ' · ' + e.credits + ' guidance credits';
+    chip.title = e.credits + ' of ' + e.allowance + ' guidance credits left in the current cycle.';
   }
 }
 
@@ -463,7 +529,7 @@ function renderBilling() {
       + Number(p.price).toLocaleString() + '<span class="text-muted text-sm">/'
       + escapeHtml(String(p.period_days)) + ' days</span></div>'
       + '<div class="text-sm text-muted">' + Number(p.allowance).toLocaleString()
-      + ' AI credits per month</div>';
+      + ' guidance credits per cycle</div>';
 
     /* WHAT IT ADDS, from the entitlement map the server sent. Nothing is
        advertised that the catalog does not actually grant. */
@@ -539,13 +605,28 @@ async function submitCheckout(planKey) {
 
     if (!data.ok) {
       statusEl.innerHTML = '<span class="text-red">' +
-        escapeHtml(data.detail || 'The payment could not be started.') + '</span>';
+        escapeHtml(resolveUserError(data, 'The payment could not be started.')) + '</span>';
       return;
     }
 
     billingState.payment = data.payment_id;
-    statusEl.innerHTML = icon('clock') + ' ' + escapeHtml(data.detail
-      || 'Check your phone and approve the payment.');
+    /* TELL THEM WHAT TO LOOK FOR. A handset can show several prompts; naming
+       the account and amount lets the payer confirm it is ours before entering
+       a PIN. And the last line is the honest one — nothing has been paid or
+       upgraded yet, whatever the prompt looks like. */
+    var p = data.prompt || {};
+    statusEl.innerHTML = icon('clock')
+      + ' <strong>Request sent'
+      + (p.phone ? ' to ' + escapeHtml(p.phone) : '') + '.</strong>'
+      + '<div style="margin-top:0.35rem;">Your phone will show '
+      + (p.account ? '<strong>' + escapeHtml(p.account) + '</strong>' : 'the request')
+      + ' for <strong>' + escapeHtml(data.currency || 'KES') + ' '
+      + Number(data.amount || 0).toLocaleString() + '</strong>. '
+      + 'Enter your M-Pesa PIN to approve.</div>'
+      + '<div class="text-xs text-muted" style="margin-top:0.35rem;">'
+      + 'Your plan changes only once M-Pesa confirms the payment. '
+      + 'This usually takes a few seconds.</div>'
+      + '<div id="checkout-elapsed" class="text-xs text-muted" style="margin-top:0.25rem;"></div>';
     pollCheckout(data.payment_id);
   } catch (e) {
     statusEl.innerHTML = '<span class="text-red">Connection error.</span>';
@@ -564,10 +645,26 @@ function pollCheckout(paymentId) {
   clearInterval(billingState.poll);
   billingState.poll = setInterval(async function () {
     tries += 1;
+
+    /* THREE MINUTES OF AN UNCHANGING LINE reads as a hung page. The counter
+       says the app is still listening, without ever implying progress towards
+       a result it does not have. */
+    var elapsedEl = document.getElementById('checkout-elapsed');
+    if (elapsedEl) {
+      var secs = tries * 3;
+      elapsedEl.textContent = secs < 15
+        ? 'Waiting for M-Pesa…'
+        : 'Still waiting — ' + secs + 's. You can leave this page; '
+          + 'the payment will still be applied.';
+    }
+
     if (tries > 60) {   // ~3 minutes, past the checkout window
       clearInterval(billingState.poll);
-      if (statusEl) statusEl.innerHTML = '<span class="text-amber">No confirmation yet. '
-        + 'If you approved the payment it may still arrive — check Plan &amp; Credits shortly.</span>';
+      if (statusEl) statusEl.innerHTML = '<span class="text-amber">' + icon('alert-triangle')
+        + ' <strong>No confirmation yet.</strong>'
+        + '<div style="margin-top:0.35rem;">If you approved the payment it may still '
+        + 'arrive — your plan will update on its own. Check Plan &amp; Credits shortly. '
+        + 'You have not been charged twice by waiting.</div></span>';
       return;
     }
     try {
@@ -589,9 +686,22 @@ function pollCheckout(paymentId) {
         renderUpgradeCard();
       } else if (d.status === 'failed' || d.status === 'expired' || d.status === 'cancelled') {
         clearInterval(billingState.poll);
-        if (statusEl) statusEl.innerHTML = '<span class="text-red">Payment '
-          + escapeHtml(d.status) + (d.failure_reason ? ': ' + escapeHtml(d.failure_reason) : '')
-          + '. Your plan has not changed — you can try again.</span>';
+        /* IN THE PAYER'S LANGUAGE. "expired" is Daraja's word for a prompt
+           nobody answered, and "cancelled" for one that was declined — showing
+           the raw status makes a normal outcome read like a system error. */
+        var said = d.status === 'cancelled'
+          ? 'You declined the request on your phone.'
+          : d.status === 'expired'
+            ? 'The request timed out on your phone.'
+            : 'M-Pesa could not complete the payment.';
+        if (statusEl) statusEl.innerHTML = '<span class="text-red">' + icon('x-circle')
+          + ' <strong>' + escapeHtml(said) + '</strong>'
+          + '<div style="margin-top:0.35rem;">You have not been charged, and your plan '
+          + 'has not changed. You can try again.</div>'
+          + (d.failure_reason
+            ? '<div class="text-xs text-muted" style="margin-top:0.25rem;">'
+              + escapeHtml(d.failure_reason) + '</div>'
+            : '') + '</span>';
       }
     } catch (e) { /* keep polling */ }
   }, 3000);
@@ -632,15 +742,15 @@ function renderPlanPanel() {
   var e = appState.entitlement;
   if (!e) { el.innerHTML = '<p class="text-sm text-muted">Loading plan…</p>'; return; }
 
-  var h = '<div class="plan-current text-sm">Current plan: <strong class="text-brand-bright">' + escapeHtml(e.plan_label) + '</strong>' + (e.byok ? ' — using your own API key' : '') + '</div>';
+  var h = '<div class="plan-current text-sm">Current plan: <strong class="text-brand-bright">' + escapeHtml(e.plan_label) + '</strong>' + (e.byok ? ' — using your own key' : '') + '</div>';
   if (e.byok) {
-    h += '<p class="text-sm text-muted" style="margin-top:0.5rem;">You’re on Custom AI: your own key is used and AI usage is <strong>not metered</strong>. Remove your key in the AI Assistant tab to fall back to a managed plan.</p>';
+    h += '<p class="text-sm text-muted" style="margin-top:0.5rem;">You’re on Custom Guidance: your own key is used and guidance usage is <strong>not metered</strong>. Remove your key in the Guided Assistant tab to fall back to a managed plan.</p>';
   } else {
     var pct = e.allowance ? Math.max(0, Math.min(100, Math.round((e.credits / e.allowance) * 100))) : 0;
     h += '<div class="progress-bar" style="margin:0.6rem 0;"><div class="progress-fill" style="width:' + pct + '%"></div></div>';
-    h += '<div class="text-sm text-muted"><strong class="text-main">' + e.credits + '</strong> of ' + e.allowance + ' AI credits left this month.</div>';
+    h += '<div class="text-sm text-muted"><strong class="text-main">' + e.credits + '</strong> of ' + e.allowance + ' guidance credits left in the current cycle.</div>';
   }
-  h += '<div class="text-xs text-muted" style="margin-top:0.75rem;">Credit costs — AI chat: 2 · action plan: 10 · monthly review: 15 · forecast advisor: 25 · what-if: 25. Your computed dashboard, reports and PDF exports are always free.</div>';
+  h += '<div class="text-xs text-muted" style="margin-top:0.75rem;">Usage costs — guided chat: 2 · action plan: 10 · monthly review: 15 · forecast advisor: 25 · what-if: 25. Your computed dashboard, reports and PDF exports are always free.</div>';
 
   /* What this plan includes, and what the next tier would add. Built entirely
      from server-supplied capabilities — no plan names or feature lists here. */
@@ -915,13 +1025,13 @@ function renderDisclosure(disclosure) {
 function renderAiInsightsCard(aiInsights) {
   if (!aiInsights) {
     return '<div class="glass-card ai-insights-card section-gap">' +
-      '<div class="card-title">' + icon('bot') + ' AI Insights</div>' +
-      '<p class="text-sm text-muted">Connect an AI provider in <a href="#settings" class="text-brand" style="text-decoration:underline;">Settings</a> to unlock AI-written findings for this page.</p>' +
+      '<div class="card-title">' + icon('bot') + ' Guided Insights</div>' +
+      '<p class="text-sm text-muted">Enable live guidance in <a href="#settings" class="text-brand" style="text-decoration:underline;">Settings</a> to get extra narrative on this page.</p>' +
       '</div>';
   }
 
   var html = '<div class="glass-card ai-insights-card glow-border section-gap">';
-  html += '<div class="card-title">' + icon('bot') + ' AI Insights</div>';
+  html += '<div class="card-title">' + icon('bot') + ' Guided Insights</div>';
 
   if (aiInsights.narrative) {
     html += '<p class="text-sm" style="line-height:1.6;margin-bottom:1rem;">' + escapeHtml(aiInsights.narrative) + '</p>';
@@ -1202,8 +1312,7 @@ async function loadProfile() {
         '<div class="profile-field"><div class="profile-field-label">Company</div><div class="profile-field-value">' + escapeHtml(p.business_name || appState.businessName) + '</div></div>' +
         '<div class="profile-field"><div class="profile-field-label">Zoho</div><div class="profile-field-value">' + (p.zoho_api_key ? icon('check-circle', { cls: 'text-emerald' }) + ' Connected' : icon('x-circle', { cls: 'text-muted' }) + ' Not connected') + '</div></div>' +
         '<div class="profile-field"><div class="profile-field-label">Wallet</div><div class="profile-field-value text-sm">' + escapeHtml(maskWalletAddress(p.wallet_address)) + '</div></div>' +
-        '<div class="profile-field"><div class="profile-field-label">AI Provider</div><div class="profile-field-value">' + escapeHtml(p.ai_provider || appState.aiProvider || 'openai') + '</div></div>' +
-        '<div class="profile-field"><div class="profile-field-label">AI Assistant</div><div class="profile-field-value">' + escapeHtml(p.ai_assistant || appState.aiAssistant || 'controller-core') + '</div></div>' +
+        '<div class="profile-field"><div class="profile-field-label">Guidance</div><div class="profile-field-value">' + (appState.aiApiKeyConfigured ? icon('check-circle', { cls: 'text-emerald' }) + ' Enabled' : icon('info', { cls: 'text-muted' }) + ' Using built-in mode') + '</div></div>' +
         (session.authenticated
           ? '<button type="button" class="btn-secondary btn-full" style="margin-top:0.75rem;" onclick="window.location.href=\'/api/auth/google/logout\'">Log Out</button>'
           : (session.google_enabled
@@ -1544,7 +1653,7 @@ async function handleUploadSubmit(containerId, opts) {
 
     if (!data.ok) {
       resultEl.innerHTML = '<p class="text-red text-sm" style="margin-top:0.75rem;">'
-        + escapeHtml(data.error || 'Upload failed.') + '</p>'
+        + escapeHtml(resolveUserError(data, 'Upload failed.')) + '</p>'
         + renderUnreadDocuments(data.rejected, data.out_of_period);
       return;
     }
@@ -1987,6 +2096,30 @@ function renderImportData() {
   loadImportHistory();
 }
 
+/**
+ * Record which periods are analysable, from a server response.
+ *
+ * `null` means UNKNOWN, and unknown must leave every month clickable. Two ways
+ * to arrive at unknown, and both used to collapse into "none":
+ *
+ *   - persistence is unavailable, so the server cannot see stored runs at all;
+ *   - a LIVE SOURCE is connected, so a month needs no stored run to have data.
+ *     Zoho can fetch any period on request, and gating on "already analysed"
+ *     made that impossible to reach: June could not be analysed because June
+ *     had not been analysed.
+ *
+ * The symptom was a Zoho user with a full June being sent to the upload page.
+ */
+function applyAvailablePeriods(list, meta) {
+  var m = meta || {};
+  if (m.live_source) { appState.availablePeriods = null; return; }
+  if (m.persistence === 'unavailable' || list === null || list === undefined) {
+    appState.availablePeriods = null;
+    return;
+  }
+  appState.availablePeriods = list;
+}
+
 /** Which periods this tenant actually has, from the server. */
 async function loadImportHistory() {
   var el = document.getElementById('import-history');
@@ -1995,8 +2128,10 @@ async function loadImportHistory() {
     var res = await fetch('/api/financial-data/uploads');
     var data = await res.json();
     var imports = (data && data.imports) || [];
-    appState.availablePeriods = imports.filter(function (i) { return i.analysed; })
-      .map(function (i) { return i.period; });
+    applyAvailablePeriods(
+      imports.filter(function (i) { return i.analysed; })
+        .map(function (i) { return i.period; }),
+      data);
 
     if (!imports.length) {
       el.innerHTML = '<p class="text-sm text-muted">Nothing imported yet. '
@@ -2045,7 +2180,11 @@ async function loadAvailablePeriods() {
     var res = await fetch('/api/analysis/periods');
     var d = await res.json();
     if (d && d.ok) {
-      appState.availablePeriods = (d.periods || []).map(function (p) { return p.period; });
+      applyAvailablePeriods(
+        d.periods === null || d.periods === undefined
+          ? null
+          : d.periods.map(function (p) { return p.period; }),
+        d);
       if (appState.currentPage === 'overview') renderOverview();
     }
   } catch (e) { /* leave null: every month stays clickable */ }
@@ -2089,7 +2228,7 @@ var routes = {
   'analytics':     { title: 'Analytics',          render: function() { renderTabbedPage('analytics'); } },
   'concentration': { title: 'Concentration Risk', render: function() { renderTabbedPage('concentration'); } },
   'contracts':     { title: 'Contracts',          render: function() { renderSimplePage(renderContracts); } },
-  'ai':            { title: 'FinGuard AI',         render: function() { renderSimplePage(renderAIController); } },
+  'ai':            { title: 'FinGuard',         render: function() { renderSimplePage(renderAIController); } },
   'settings':      { title: 'Settings',           render: function() { renderSimplePage(renderSettings); } }
 };
 
@@ -2175,7 +2314,7 @@ var ANALYSIS_STEPS = [
   'Analyzing cash flow & runway',
   'Reviewing vendor & customer concentration',
   'Scoring financial health',
-  'Writing the AI narrative'
+  'Writing guided insights'
 ];
 
 function startAnalysisProgress(month, label) {
@@ -2199,7 +2338,7 @@ function startAnalysisProgress(month, label) {
       '</div>' +
       '<div class="ap-headline">' +
         '<div class="ap-title">Running your monthly review…</div>' +
-        '<div class="ap-sub">Analyzing ' + escapeHtml(periodLabel) + ' — this can take up to a minute on the free AI tier.</div>' +
+        '<div class="ap-sub">Analyzing ' + escapeHtml(periodLabel) + ' — this can take up to a minute on busy periods.</div>' +
       '</div>' +
       '<ul class="ap-steps">' + steps + '</ul>' +
       '<div class="ap-note">' + icon('check-circle') + ' You can switch to other tabs while this runs — we’ll notify you when the analysis is ready.</div>' +
@@ -2304,7 +2443,7 @@ async function runMonthlyReview(month, opts) {
       appState.isDemoData ? 'warning' : 'success');
       notifyAiFailureIfAny(data.aiAnalysis);
     } else {
-      showToast('Analysis failed: ' + (data.error || 'Unknown error'), 'error');
+      showToast(resolveUserError(data, 'We could not complete this analysis.'), 'error');
       $analysisMonth.innerHTML = icon('x-circle') + ' Failed';
     }
   } catch (e) {
@@ -2415,7 +2554,7 @@ function dailyReportHtml() {
       'Automatic scheduled monitoring is a Growth capability.</p>' +
       '<div class="dr-actions" style="margin-top:0;">' +
         '<button type="button" class="btn-primary btn-small" onclick="syncDailyReport()">' + icon('clock') + ' Run analysis now</button>' +
-        '<button type="button" class="btn-ghost btn-small" onclick="showUpgradeModal(\'Automatic scheduled monitoring is available on the Growth and Custom AI plans. Manual analysis stays unlimited on Starter.\')">' + lockIcon() + ' Automate this</button>' +
+        '<button type="button" class="btn-ghost btn-small" onclick="showUpgradeModal(\'Automatic scheduled monitoring is available on the Growth and Custom Guidance plans. Manual analysis stays unlimited on Starter.\')">' + lockIcon() + ' Automate this</button>' +
       '</div></div>';
   } else if (!enabled) {
     html += '<div class="dr-off">' +
@@ -2668,7 +2807,7 @@ function renderOverview() {
 
   var criticalFindings = (risk.findings || risk.items || review.findings || []).slice(0, 6);
 
-  /* AI summary body (shown in the right rail) */
+  /* guidance summary body (shown in the right rail) */
   var aiAnalysis = d.aiAnalysis || {};
   var aiSummaryBody;
   if (aiAnalysis.ok && aiAnalysis.insights) {
@@ -2684,11 +2823,11 @@ function renderOverview() {
     }
   } else if (aiAnalysis.reason === 'missing_ai_api_key' || aiAnalysis.mode === 'skills-fallback') {
     var fallbackHint = aiAnalysis.reason === 'missing_ai_api_key'
-      ? 'Connect an AI provider in Settings for richer AI-written analysis.'
-      : escapeHtml(AI_FAILURE_MESSAGES[aiAnalysis.reason] || ('AI analysis failed (' + aiAnalysis.reason + '). Showing rule-based analysis instead.'));
+      ? 'Enable live guidance in Settings for richer guided analysis.'
+      : escapeHtml(AI_FAILURE_MESSAGES[aiAnalysis.reason] || 'Live guidance is unavailable right now. Showing computed insights instead.');
     aiSummaryBody = '<p class="text-sm" style="line-height:1.7;white-space:pre-wrap;">' + escapeHtml(typeof ai === 'string' ? ai : JSON.stringify(ai, null, 2)) + '</p>' +
       '<p class="text-xs text-muted" style="margin-top:0.75rem;">' + fallbackHint + '</p>' +
-      '<button type="button" class="btn-secondary btn-small" style="margin-top:0.6rem;" onclick="navigate(\'settings\')">' + icon('settings') + ' Switch AI provider</button>';
+      '<button type="button" class="btn-secondary btn-small" style="margin-top:0.6rem;" onclick="navigate(\'settings\')">' + icon('settings') + ' Switch guidance mode</button>';
   } else {
     aiSummaryBody = '<p class="text-sm" style="line-height:1.7;white-space:pre-wrap;">' + escapeHtml(typeof ai === 'string' ? ai : JSON.stringify(ai, null, 2)) + '</p>';
   }
@@ -2793,8 +2932,8 @@ function renderOverview() {
     html += '<div class="glass-card"><div class="card-title">Expense Breakdown</div>' + fundexDonut(segs) + '</div>';
   }
 
-  /* AI summary */
-  html += '<div class="glass-card"><div class="card-title">' + icon('bot') + ' FinGuard AI Summary</div>' + aiSummaryBody + '</div>';
+  /* guidance summary */
+  html += '<div class="glass-card"><div class="card-title">' + icon('bot') + ' FinGuard Summary</div>' + aiSummaryBody + '</div>';
 
   html += '</div>'; /* /dash-rail */
   html += '</div>'; /* /dash-grid */
@@ -3023,32 +3162,32 @@ function renderForecast() {
     var ai = data.ai || {};
     var advisorLocked = (ai.reason === 'upgrade_required');
     html += '<div class="glass-card' + (advisorLocked ? ' advisor-locked' : '') + '">' +
-      '<div class="card-title">' + (advisorLocked ? lockIcon() : icon('bot')) + ' AI Cash Flow Advisor' +
+      '<div class="card-title">' + (advisorLocked ? lockIcon() : icon('bot')) + ' Cash Flow Advisor' +
       (advisorLocked ? '<span class="locked-badge" style="margin-left:auto;">' + escapeHtml(featureRequiredPlan('ai_forecast_advisory')) + '</span>' : '') +
       '</div>';
     if (ai.ok && ai.text) {
       html += '<p class="text-sm" style="line-height:1.7;white-space:pre-wrap;">' + escapeHtml(ai.text) + '</p>';
     } else if (advisorLocked) {
       html += '<p class="text-sm text-muted">Your <strong>Cash Flow Forecast</strong> above is complete and always free — every number, horizon and runway figure is yours.</p>' +
-        '<p class="text-sm text-muted" style="margin-top:0.5rem;">The <strong>AI Cash Flow Advisor</strong> adds the interpretation: what the trend means, which risks matter first, and what to do about them.</p>' +
+        '<p class="text-sm text-muted" style="margin-top:0.5rem;">The <strong>Cash Flow Advisor</strong> adds the interpretation: what the trend means, which risks matter first, and what to do about them.</p>' +
         '<ul class="locked-list" style="margin-top:0.6rem;">' +
           '<li>Reads your forecast and explains the outlook in plain language</li>' +
           '<li>Prioritises the risks that actually threaten your runway</li>' +
           '<li>Recommends concrete next actions</li>' +
         '</ul>' +
-        '<button type="button" class="btn-primary btn-small" onclick="showUpgradeModal(\'' + escapeHtml(upgradeMessage('ai_forecast_advisory')) + '\')">Unlock the AI Advisor</button>';
+        '<button type="button" class="btn-primary btn-small" onclick="showUpgradeModal(\'' + escapeHtml(upgradeMessage('ai_forecast_advisory')) + '\')">Unlock the Advisor</button>';
     } else if (ai.reason === 'insufficient_credits') {
-      html += '<p class="text-sm text-muted">You’re out of AI credits this month. Your Cash Flow Forecast above is unaffected — top up or add your own API key for the AI Advisor.</p>' +
+      html += '<p class="text-sm text-muted">You’re out of guidance credits in the current cycle. Your Cash Flow Forecast above is unaffected — top up or add your own access key for the advisor.</p>' +
         '<button type="button" class="btn-primary btn-small" style="margin-top:0.6rem;" onclick="navigate(\'settings\')">Upgrade / add key</button>';
     } else if (ai.reason === 'missing_ai_api_key' || ai.reason === 'managed_key_unavailable') {
-      html += '<p class="text-sm text-muted">Add an AI provider in Settings to get the AI Advisor’s interpretation of this forecast.</p>' +
-        '<button type="button" class="btn-secondary btn-small" style="margin-top:0.6rem;" onclick="navigate(\'settings\')">' + icon('settings') + ' AI settings</button>';
+      html += '<p class="text-sm text-muted">Enable live guidance in Settings to get the advisor’s interpretation of this forecast.</p>' +
+        '<button type="button" class="btn-secondary btn-small" style="margin-top:0.6rem;" onclick="navigate(\'settings\')">' + icon('settings') + ' Guidance settings</button>';
     } else {
-      html += '<p class="text-sm text-muted">' + escapeHtml(AI_FAILURE_MESSAGES[ai.reason] || 'The AI Advisor is unavailable right now — your Cash Flow Forecast above is still valid.') + '</p>';
+      html += '<p class="text-sm text-muted">' + escapeHtml(AI_FAILURE_MESSAGES[ai.reason] || 'The guidance advisor is unavailable right now — your Cash Flow Forecast above is still valid.') + '</p>';
     }
     html += '</div>';
     html += '<div class="glass-card"><div class="card-title">How this is computed</div>' +
-      '<p class="text-sm text-muted">Your <strong>Cash Flow Forecast</strong> projects current cash forward at this month’s net run-rate — computed by the <span class="mono">cashflow-forecaster</span> skill, free on every plan. The <strong>AI Cash Flow Advisor</strong> only interprets those numbers; it never calculates or changes them.</p></div>';
+      '<p class="text-sm text-muted">Your <strong>Cash Flow Forecast</strong> projects current cash forward at this month’s net run-rate. The <strong>Cash Flow Advisor</strong> only interprets those numbers; it never calculates or changes them.</p></div>';
     html += '</div></div>'; /* /dash-rail /dash-grid */
 
     html += whatIfCardHtml();
@@ -3102,7 +3241,7 @@ function whatIfCardHtml() {
   return '<div class="glass-card whatif-card">' +
     '<div class="card-head"><div>' +
       '<div class="chart-title">' + icon('sliders') + ' What-If Simulator</div>' +
-      '<div class="chart-sub">Model a decision before you make it, then get an AI recommendation.</div>' +
+      '<div class="chart-sub">Model a decision before you make it, then get a guided recommendation.</div>' +
     '</div></div>' +
     '<div class="whatif-controls">' +
       '<div class="whatif-field"><label class="whatif-label">Scenario</label>' +
@@ -3159,7 +3298,7 @@ function runWhatIfSimulation() {
     if (!data || !data.ok) {
       if (data && data.error === 'upgrade_required') {
         loadEntitlement().then(function() { renderTabbedPage('analytics'); });
-        showUpgradeModal(data.message || 'The What-If Simulator is available on the Growth and Custom AI plans.');
+        showUpgradeModal(data.message || 'The What-If Simulator is available on the Growth and Custom Guidance plans.');
         return;
       }
       out.innerHTML = '<div class="whatif-loading text-red">' + icon('x-circle') + ' ' +
@@ -3167,7 +3306,7 @@ function runWhatIfSimulation() {
       return;
     }
     renderWhatIfResults(data);
-    loadEntitlement(); /* AI recommendation may have spent credits */
+    loadEntitlement(); /* guided recommendation may have spent credits */
   }).catch(function() {
     if (btn) { btn.disabled = false; btn.innerHTML = icon('play') + ' Run Simulation'; }
     out.innerHTML = '<div class="whatif-loading text-red">' + icon('x-circle') + ' Connection error during simulation.</div>';
@@ -3216,23 +3355,23 @@ function renderWhatIfResults(data) {
     '<span>Monthly net: <strong>' + formatCurrency(r.baseline.monthly_net) + '</strong>' + arrow + '<strong class="' + (r.adjusted.monthly_net >= r.baseline.monthly_net ? 'text-emerald' : 'text-red') + '">' + formatCurrency(r.adjusted.monthly_net) + '</strong></span>' +
   '</div>';
 
-  /* AI recommendation */
+  /* guided recommendation */
   var ai = data.ai || {};
   html += '<div class="whatif-ai">';
-  html += '<div class="card-title">' + icon('bot') + ' AI Recommendation</div>';
+  html += '<div class="card-title">' + icon('bot') + ' Guided Recommendation</div>';
   if (ai.ok && ai.text) {
     html += '<p class="text-sm" style="line-height:1.7;white-space:pre-wrap;">' + escapeHtml(ai.text) + '</p>';
   } else if (ai.reason === 'upgrade_required') {
-    html += '<p class="text-sm text-muted">' + escapeHtml(ai.message || 'The AI recommendation is available on Growth or Custom AI. The simulation numbers above are free.') + '</p>' +
-      '<button type="button" class="btn-primary btn-small" style="margin-top:0.6rem;" onclick="showUpgradeModal(\'Unlock AI recommendations for what-if scenarios on the Growth or Custom AI plans.\')">' + icon('bot') + ' Unlock AI recommendation</button>';
+    html += '<p class="text-sm text-muted">' + escapeHtml(ai.message || 'The guided recommendation is available on Growth or Custom Guidance. The simulation numbers above are free.') + '</p>' +
+      '<button type="button" class="btn-primary btn-small" style="margin-top:0.6rem;" onclick="showUpgradeModal(\'Unlock guided recommendations for what-if scenarios on the Growth or Custom Guidance plans.\')">' + icon('bot') + ' Unlock guided recommendation</button>';
   } else if (ai.reason === 'insufficient_credits') {
-    html += '<p class="text-sm text-muted">You’re out of AI credits this month. The simulation numbers are free — upgrade or add your own API key for the AI recommendation.</p>' +
+    html += '<p class="text-sm text-muted">You’re out of guidance credits in the current cycle. The simulation numbers are free — upgrade or add your own access key for the guided recommendation.</p>' +
       '<button type="button" class="btn-primary btn-small" style="margin-top:0.6rem;" onclick="navigate(\'settings\')">Upgrade / add key</button>';
   } else if (ai.reason === 'missing_ai_api_key' || ai.reason === 'managed_key_unavailable') {
-    html += '<p class="text-sm text-muted">Add an AI provider in Settings for an AI-written recommendation.</p>' +
-      '<button type="button" class="btn-secondary btn-small" style="margin-top:0.6rem;" onclick="navigate(\'settings\')">' + icon('settings') + ' AI settings</button>';
+    html += '<p class="text-sm text-muted">Enable live guidance in Settings for a guided recommendation.</p>' +
+      '<button type="button" class="btn-secondary btn-small" style="margin-top:0.6rem;" onclick="navigate(\'settings\')">' + icon('settings') + ' Guidance settings</button>';
   } else {
-    html += '<p class="text-sm text-muted">' + escapeHtml(AI_FAILURE_MESSAGES[ai.reason] || 'AI recommendation unavailable — the simulation numbers above are still valid.') + '</p>';
+    html += '<p class="text-sm text-muted">' + escapeHtml(AI_FAILURE_MESSAGES[ai.reason] || 'Guided recommendation unavailable — the simulation numbers above are still valid.') + '</p>';
   }
   html += '</div>';
 
@@ -3501,7 +3640,7 @@ function renderActionCenter() {
 
     /* Action bar */
     html += '<div style="display:flex;gap:0.75rem;margin-bottom:1.25rem;flex-wrap:wrap;">';
-    html += '<button class="btn-primary btn-small" onclick="generateActionPlan()">' + icon('bot') + ' Generate AI Action Plan</button>';
+    html += '<button class="btn-primary btn-small" onclick="generateActionPlan()">' + icon('bot') + ' Generate Guided Action Plan</button>';
     html += '<button class="btn-small" onclick="exportActions(\'csv\')">' + icon('download') + ' Export CSV</button>';
     html += '<button class="btn-small" onclick="exportActions(\'json\')">' + icon('download') + ' Export JSON</button>';
     html += '</div>';
@@ -3535,10 +3674,10 @@ function renderActionCenter() {
   });
 }
 
-/* AI Action Plan (gated premium action) */
+/* Guided Action Plan (gated premium action) */
 function generateActionPlan() {
   var out = document.getElementById('action-plan-result');
-  if (out) out.innerHTML = '<div class="glass-card"><div class="card-title">' + icon('bot') + ' AI Action Plan</div>' + renderLoadingShimmer(2) + '</div>';
+  if (out) out.innerHTML = '<div class="glass-card"><div class="card-title">' + icon('bot') + ' Guided Action Plan</div>' + renderLoadingShimmer(2) + '</div>';
   fetch('/api/action-plan', {
     method: 'POST', headers: mutatingHeaders(), body: JSON.stringify({ month: appState.activeMonth || null })
   }).then(function(r) { return r.json(); }).then(function(data) {
@@ -3548,15 +3687,15 @@ function generateActionPlan() {
     if (ai.ok && ai.text) {
       body = '<p class="text-sm" style="line-height:1.7;white-space:pre-wrap;">' + escapeHtml(ai.text) + '</p>';
     } else if (ai.reason === 'insufficient_credits') {
-      body = '<p class="text-sm text-muted">You’re out of AI credits this month. Upgrade to Pro or add your own API key to generate action plans.</p>' +
+      body = '<p class="text-sm text-muted">You’re out of guidance credits in the current cycle. Upgrade to Pro or add your own access key to generate action plans.</p>' +
         '<button type="button" class="btn-primary btn-small" style="margin-top:0.6rem;" onclick="navigate(\'settings\')">Upgrade / add key</button>';
     } else if (ai.reason === 'missing_ai_api_key' || ai.reason === 'managed_key_unavailable') {
-      body = '<p class="text-sm text-muted">Add an AI provider in Settings to generate an action plan.</p>' +
-        '<button type="button" class="btn-secondary btn-small" style="margin-top:0.6rem;" onclick="navigate(\'settings\')">' + icon('settings') + ' AI settings</button>';
+      body = '<p class="text-sm text-muted">Enable live guidance in Settings to generate an action plan.</p>' +
+        '<button type="button" class="btn-secondary btn-small" style="margin-top:0.6rem;" onclick="navigate(\'settings\')">' + icon('settings') + ' Guidance settings</button>';
     } else {
       body = '<p class="text-sm text-muted">' + escapeHtml(AI_FAILURE_MESSAGES[ai.reason] || 'Could not generate the action plan. Try again.') + '</p>';
     }
-    out.innerHTML = '<div class="glass-card glow-border"><div class="card-title">' + icon('bot') + ' AI Action Plan · ' + escapeHtml(getMonthLabel(data.month || '')) + '</div>' + body + '</div>';
+    out.innerHTML = '<div class="glass-card glow-border"><div class="card-title">' + icon('bot') + ' Guided Action Plan · ' + escapeHtml(getMonthLabel(data.month || '')) + '</div>' + body + '</div>';
     loadEntitlement();
   }).catch(function() {
     if (out) out.innerHTML = '<div class="glass-card"><p class="text-sm text-red">Could not generate the action plan. Try again.</p></div>';
@@ -3685,7 +3824,7 @@ async function generateReport(reportType) {
         showToast('Report generated successfully!', 'success');
       }
     } else {
-      resultEl.innerHTML = '<p class="text-red text-sm" style="margin-top:1rem;">Failed: ' + escapeHtml(data.error || 'Unknown error') + '</p>';
+      resultEl.innerHTML = '<p class="text-red text-sm" style="margin-top:1rem;">Failed: ' + escapeHtml(resolveUserError(data, 'This operation could not be completed.')) + '</p>';
     }
   } catch (e) {
     resultEl.innerHTML = '<p class="text-red text-sm" style="margin-top:1rem;">Connection error.</p>';
@@ -3717,7 +3856,7 @@ function downloadExecutiveReportPdf(reportType) {
     }
     return res.json().then(function(d) {
       if (d.error === 'no_report') showToast('Run a monthly review first, then download.', 'warning');
-      else showToast('Could not generate the PDF: ' + (d.message || d.error || 'error'), 'error');
+      else showToast(resolveUserError(d, 'Could not generate the PDF right now.'), 'error');
     });
   }).catch(function() { showToast('Could not download the PDF. Try again.', 'error'); });
 }
@@ -3786,7 +3925,7 @@ function renderRenewalBanner() {
     + '<div class="callout-warning-icon">' + icon('clock') + '</div>'
     + '<div class="callout-warning-text">'
     + 'Your ' + escapeHtml(planLabel) + ' plan expires ' + escapeHtml(when) + '. '
-    + 'Renew to keep forecasting, what-if analysis and advanced AI features.'
+    + 'Renew to keep forecasting, what-if analysis and advanced guided features.'
     + '<div style="margin-top:0.6rem;"><button type="button" class="btn-primary btn-small" '
     + 'onclick="openPlansAndBilling()">Renew now</button></div>'
     + '</div></div>';
@@ -3807,7 +3946,7 @@ function showUpgradeModal(message) {
          button showed "Could not change plan". An upgrade now goes where an
          upgrade actually happens: Plans & Billing, and a real checkout. */
       '<button type="button" class="btn-primary btn-full" onclick="closeUpgradeModal();openPlansAndBilling()">See plans &amp; upgrade</button>' +
-      '<button type="button" class="btn-secondary btn-full" onclick="closeUpgradeModal();navigate(\'settings\')">Add my own API key</button>' +
+      '<button type="button" class="btn-secondary btn-full" onclick="closeUpgradeModal();navigate(\'settings\')">Add my own access key</button>' +
       '<button type="button" class="btn-ghost" onclick="closeUpgradeModal()">Maybe later</button>' +
     '</div></div>';
   wrap.addEventListener('click', function(ev) { if (ev.target === wrap) closeUpgradeModal(); });
@@ -3819,7 +3958,7 @@ function closeUpgradeModal() {
   if (m) m.remove();
 }
 
-/* ── FinGuard AI (Chat) ────────────────────────────────────── */
+/* ── FinGuard (Chat) ────────────────────────────────────── */
 function renderAIController() {
   var suggestedQuestions = [
     'Why is profit dropping?',
@@ -3832,7 +3971,7 @@ function renderAIController() {
   var html = '<div class="chat-page">';
 
   html += '<div class="glass-card" style="margin-bottom:1rem;padding:0.9rem 1rem">';
-  html += '<div class="text-sm text-muted">Assistant: <strong>' + escapeHtml(appState.aiAssistant) + '</strong> via <strong>' + escapeHtml(appState.aiProvider) + '</strong> · Skill-first processing</div>';
+  html += '<div class="text-sm text-muted">Assistant style: <strong>' + escapeHtml(appState.aiAssistant) + '</strong> · grounded in your latest analysis</div>';
   html += '</div>';
 
   /* Chat chips */
@@ -3861,7 +4000,7 @@ function renderAIController() {
 
   /* Input bar */
   html += '<div class="chat-input-wrapper">';
-  html += '<input type="text" class="chat-input" id="chat-input" placeholder="Ask the FinGuard AI…" onkeydown="if(event.key===\'Enter\')sendChat()" />';
+  html += '<input type="text" class="chat-input" id="chat-input" placeholder="Ask the FinGuard…" onkeydown="if(event.key===\'Enter\')sendChat()" />';
   html += '<button class="btn-primary" onclick="sendChat()">Send ' + icon('send') + '</button>';
   html += '</div>';
 
@@ -3884,7 +4023,7 @@ function renderAIController() {
   }
 }
 
-/* Render a safe subset of Markdown so AI answers show as formatted text
+/* Render a safe subset of Markdown so guided answers show as formatted text
    (bold, headings, bullets) instead of raw asterisks and hashes. HTML is
    escaped FIRST, so nothing the model emits can inject markup. */
 function inlineMd(s) {
@@ -4147,8 +4286,8 @@ function renderCopilotUnavailable(data) {
     return '<div class="chat-msg ai"><div class="chat-msg-avatar finna-slot"></div>'
       + '<div class="chat-msg-bubble copilot-unavailable">'
       + '<div class="copilot-label copilot-label-unavailable">Saved, but needs re-running</div>'
-      + '<div>' + escapeHtml(data.message
-        || 'This analysis was saved before the app stored everything needed to reload it.')
+      + '<div>' + escapeHtml(resolveUserError(data,
+        'This analysis was saved before the app stored everything needed to reload it.'))
       + '</div>'
       + (period
         ? '<div style="margin-top:0.6rem"><button class="btn btn-sm btn-primary" '
@@ -4164,7 +4303,7 @@ function renderCopilotUnavailable(data) {
     + '<div class="chat-msg-bubble copilot-unavailable">'
     + '<div class="copilot-label copilot-label-unavailable">'
     + (blocked ? 'Answer withheld' : 'Not available') + '</div>'
-    + '<div>' + escapeHtml(data.message || 'I could not answer that.') + '</div>'
+    + '<div>' + escapeHtml(resolveUserError(data, 'I could not answer that.')) + '</div>'
     + (blocked
       ? '<div class="text-sm text-muted" style="margin-top:0.5rem">Your analysis is '
         + 'unaffected &mdash; the findings and scores on your dashboard are computed by '
@@ -4921,14 +5060,14 @@ function renderRulesPanel() {
 
   // Free (read-only): examples + upgrade prompt.
   if (!d.can_manage) {
-    var hf = '<p class="text-sm text-muted" style="margin-bottom:1rem;">Custom rules are available on <strong>Growth</strong> and <strong>Custom AI</strong>. Examples of what you could set up:</p><div class="rules-list">';
+    var hf = '<p class="text-sm text-muted" style="margin-bottom:1rem;">Custom rules are available on <strong>Growth</strong> and <strong>Custom Guidance</strong>. Examples of what you could set up:</p><div class="rules-list">';
     d.examples.forEach(function(ex) {
       hf += '<div class="rule-row rule-example"><div class="rule-row-main">' +
         '<div class="rule-row-name">' + escapeHtml(ex.name) + ' <span class="' + severityClass(ex.severity) + '">' + escapeHtml(ex.severity) + '</span></div>' +
         '<div class="rule-row-sub">' + escapeHtml(ex.description) + ' · action: ' + escapeHtml(ex.action.replace(/_/g, ' ')) + '</div></div></div>';
     });
     hf += '</div><div class="rules-upgrade"><button type="button" class="btn-primary" onclick="setPlan(\'pro\')">Upgrade to create rules</button>' +
-      '<button type="button" class="btn-secondary" onclick="switchSettingsSection(\'assistant\')">Add my own API key</button></div>';
+      '<button type="button" class="btn-secondary" onclick="switchSettingsSection(\'assistant\')">Add my own access key</button></div>';
     el.innerHTML = hf;
     return;
   }
@@ -5000,7 +5139,7 @@ function previewRuleForm() {
   fetch('/api/rules/preview', { method: 'POST', headers: mutatingHeaders(), body: JSON.stringify(readRuleForm()) })
     .then(function(r) { return r.json(); }).then(function(d) {
       if (!out) return;
-      if (!d.ok) { out.innerHTML = '<span class="text-red">' + escapeHtml(d.message || 'Invalid rule') + '</span>'; return; }
+      if (!d.ok) { out.innerHTML = '<span class="text-red">' + escapeHtml(resolveUserError(d, 'Invalid rule.')) + '</span>'; return; }
       var p = d.preview;
       if (p.no_data) { out.innerHTML = '<span class="text-muted">Run a monthly review first to preview against real data.</span>'; return; }
       var s = '<span class="' + (p.matchCount > 0 ? 'text-amber' : 'text-emerald') + '">Would match <strong>' + p.matchCount + '</strong> item' + (p.matchCount === 1 ? '' : 's') + ' this month.</span>';
@@ -5013,8 +5152,8 @@ function saveRule() {
   fetch('/api/rules', { method: 'POST', headers: mutatingHeaders(), body: JSON.stringify(readRuleForm()) })
     .then(function(r) { return r.json(); }).then(function(d) {
       if (d.ok) { showToast('Rule saved.', 'success'); loadRules(); }
-      else if (d.error === 'upgrade_required') showUpgradeModal(d.message || 'Custom rules are available on Growth or Custom AI.');
-      else showToast(d.message || 'Could not save rule.', 'error');
+      else if (d.error === 'upgrade_required') showUpgradeModal(d.message || 'Custom rules are available on Growth or Custom Guidance.');
+      else showToast(resolveUserError(d, 'Could not save rule.'), 'error');
     }).catch(function() { showToast('Could not save rule.', 'error'); });
 }
 
@@ -5057,10 +5196,10 @@ function renderSettings() {
   var active = appState.settingsSection || 'profile';
   var navItems = [
     { key: 'profile',      label: 'Profile' },
-    { key: 'plan',         label: 'Plan & Credits' },
+    { key: 'plan',         label: 'Plan & Usage' },
     { key: 'rules',        label: 'Financial Rules' },
     { key: 'integrations', label: 'Integrations' },
-    { key: 'assistant',    label: 'AI Assistant' },
+    { key: 'assistant',    label: 'Guided Assistant' },
     { key: 'monitoring',   label: 'Monitoring' },
     { key: 'team',         label: 'Team' },
     { key: 'alerts',       label: 'Risk & Alerts' },
@@ -5100,7 +5239,7 @@ function renderSettings() {
 
   /* ── Plan & Credits ── */
   html += '<div class="settings-panel' + (active === 'plan' ? ' active' : '') + '" data-section="plan">';
-  html += '<div class="glass-card">' + cardHead('Plan & AI Credits', 'Your subscription and how much AI narration you have this month. The computed analysis is always free.') +
+  html += '<div class="glass-card">' + cardHead('Plan & Guidance Usage', 'Your subscription and available guidance usage for the current cycle. Core analysis always remains available.') +
     '<div id="plan-panel-body"><p class="text-sm text-muted">Loading plan…</p></div></div>';
   /* Upgrade cards and checkout. Populated from /api/billing/plans, so prices
      and availability come from the server catalog — never from this file. */
@@ -5123,21 +5262,11 @@ function renderSettings() {
     '<div id="settings-wallet-panel"></div></div>';
   html += '</div>';
 
-  /* ── AI Assistant ── */
+  /* ── Guided Assistant ── */
   var aiKeyPlaceholder = appState.aiApiKeyConfigured
-    ? 'Saved — leave blank to keep, or enter a new key to replace it'
-    : 'Enter AI API Key';
-  var providerControl = '<select class="settings-input" id="settings-ai-provider">' +
-      '<option value="openai"' + (appState.aiProvider === 'openai' ? ' selected' : '') + '>OpenAI</option>' +
-      '<option value="anthropic"' + (appState.aiProvider === 'anthropic' ? ' selected' : '') + '>Anthropic (Claude)</option>' +
-      '<option value="google"' + (appState.aiProvider === 'google' ? ' selected' : '') + '>Google (Gemini)</option>' +
-      '<option value="deepseek"' + (appState.aiProvider === 'deepseek' ? ' selected' : '') + '>DeepSeek</option>' +
-      '<option value="mistral"' + (appState.aiProvider === 'mistral' ? ' selected' : '') + '>Mistral AI</option>' +
-      '<option value="grok"' + (appState.aiProvider === 'grok' ? ' selected' : '') + '>Grok (xAI)</option>' +
-      '<option value="nvidia"' + (appState.aiProvider === 'nvidia' ? ' selected' : '') + '>NVIDIA NIM</option>' +
-      '<option value="azure-openai"' + (appState.aiProvider === 'azure-openai' ? ' selected' : '') + '>Azure OpenAI</option>' +
-      '<option value="custom"' + (appState.aiProvider === 'custom' ? ' selected' : '') + '>Custom</option>' +
-    '</select>';
+    ? 'Saved - leave blank to keep, or enter a new one to replace it'
+    : 'Enter access key';
+  var providerControl = '<input type="hidden" id="settings-ai-provider" value="' + escapeHtml(appState.aiProvider || 'openai') + '" />';
   var assistantControl = '<select class="settings-input" id="settings-ai-assistant">' +
       '<option value="controller-core"' + (appState.aiAssistant === 'controller-core' ? ' selected' : '') + '>Controller Core</option>' +
       '<option value="risk-analyst"' + (appState.aiAssistant === 'risk-analyst' ? ' selected' : '') + '>Risk Analyst</option>' +
@@ -5151,33 +5280,32 @@ function renderSettings() {
   }
   html += '<div class="settings-panel' + (active === 'assistant' ? ' active' : '') + '" data-section="assistant">';
   if (planAllows('bring_your_own_ai')) {
-    /* Custom AI: the customer owns the AI — provider and key are theirs. */
+    /* Custom guidance: user-owned access key. */
     var byokNotice = '';
     if (!appState.aiApiKeyConfigured) {
       byokNotice = '<div class="byok-setup">' + icon('alert-triangle') +
-        '<div><strong>Add your API key to start.</strong><div class="text-xs text-muted">' +
-        'You are on Bring Your Own AI, so requests run on your provider. FinGuard will not fall back to managed AI — add a key below to enable AI features.</div></div></div>';
+        '<div><strong>Add your access key to start.</strong><div class="text-xs text-muted">' +
+        'Live guidance uses your own key on this plan. Add it below to enable guided features.</div></div></div>';
     }
-    html += '<div class="glass-card">' + cardHead('AI Provider & Key', 'Your provider, your key, unmetered. FinGuard routes every AI request through your account.') +
+    html += '<div class="glass-card">' + cardHead('Guidance Access Key', 'Use your own key for live guidance on this plan.') +
       byokNotice +
       '<div class="settings-fields">' +
-        field('AI Provider', providerControl) +
-        field('AI Assistant', assistantControl) +
-        field('AI API Key', keyControl, true) +
+        providerControl +
+        field('Assistant Style', assistantControl) +
+        field('Access Key', keyControl, true) +
       '</div></div>';
   } else {
-    /* Managed plans: the assistant persona is configurable, but the provider and
-       key are not — Bring Your Own AI is a Custom AI subscription capability. */
-    html += '<div class="glass-card">' + cardHead('AI Assistant', 'Choose the assistant persona. Your plan includes managed AI, so no API key is needed.') +
-      '<div class="settings-fields">' + field('AI Assistant', assistantControl) + '</div></div>';
+    /* Managed guidance mode. */
+    html += '<div class="glass-card">' + cardHead('Guided Assistant', 'Choose how your guidance is phrased. No key is required on this plan.') +
+      '<div class="settings-fields">' + field('Assistant Style', assistantControl) + '</div></div>';
     html += lockedFeatureCard(
       'bring_your_own_ai',
-      'Bring Your Own AI',
-      'Run FinGuard on your own AI provider and key, with no credit metering.'
+      'Use Your Own Key',
+      'Use your own access key for live guidance with no monthly cap.'
     );
     if (appState.aiApiKeyConfigured) {
       html += '<div class="text-xs text-muted" style="margin-top:0.75rem;">' + icon('info') +
-        ' You have an API key saved from a previous plan. It is kept safely but not used while you are on a managed plan.</div>';
+        ' You have a saved access key from a previous plan. It is kept safely but not used on this plan.</div>';
     }
   }
   html += '</div>';
@@ -5261,25 +5389,11 @@ function switchSettingsSection(sec) {
   panels.forEach(function(p) { p.classList.toggle('active', p.getAttribute('data-section') === sec); });
 }
 
-var AI_KEY_LINKS = {
-  openai: { url: 'https://platform.openai.com/api-keys', label: 'platform.openai.com' },
-  anthropic: { url: 'https://console.anthropic.com/settings/keys', label: 'console.anthropic.com' },
-  google: { url: 'https://aistudio.google.com/apikey', label: 'aistudio.google.com' },
-  deepseek: { url: 'https://platform.deepseek.com/api_keys', label: 'platform.deepseek.com' },
-  mistral: { url: 'https://console.mistral.ai/api-keys', label: 'console.mistral.ai' },
-  grok: { url: 'https://console.x.ai/team/default/api-keys', label: 'console.x.ai' },
-  nvidia: { url: 'https://build.nvidia.com', label: 'build.nvidia.com (free credits, no card)' }
-};
-
 function updateAiKeyHint(provider) {
+  void provider;
   var hintEl = document.getElementById('ai-key-hint');
   if (!hintEl) return;
-  var link = AI_KEY_LINKS[provider];
-  if (link) {
-    hintEl.innerHTML = 'Get a key from <a href="' + link.url + '" target="_blank" rel="noopener" class="text-brand">' + link.label + '</a>';
-  } else {
-    hintEl.textContent = 'Enter the API key for your configured endpoint.';
-  }
+  hintEl.textContent = 'Enter your account access key. It is stored securely and can be replaced at any time.';
 }
 
 function renderZohoPanel(containerId) {
@@ -5412,7 +5526,7 @@ async function deployContractFromSettings() {
       showToast(dryRun ? 'Dry run completed.' : 'Deployment submitted.', 'success');
       resultEl.innerHTML = '<pre class="json-block">' + prettyJson(data) + '</pre>';
     } else {
-      showToast('Deploy failed: ' + (data.message || data.error || 'Unknown error'), 'error');
+      showToast(resolveUserError(data, 'Deployment could not be completed.'), 'error');
       resultEl.innerHTML = '<pre class="json-block">' + prettyJson(data) + '</pre>';
     }
     loadContractDeploymentHistory();
@@ -5509,7 +5623,7 @@ async function saveSettings() {
     });
     var data = await res.json();
     if (!data.ok && data.error === 'upgrade_required') {
-      showUpgradeModal(data.message || 'Bring Your Own AI is available on the Custom AI plan.');
+      showUpgradeModal(data.message || 'Use Your Own Key is available on the Custom Guidance plan.');
       return;
     }
     if (data.ok) {
@@ -5519,7 +5633,7 @@ async function saveSettings() {
       appState.aiAssistant = aiAssistant;
       if (aiApiKey) appState.aiApiKeyConfigured = true;
       $companyContext.textContent = 'Company: ' + company;
-      showToast(aiApiKey ? 'Settings saved — AI API key stored.' : 'Settings saved successfully!', 'success');
+      showToast(aiApiKey ? 'Settings saved — AI access key stored.' : 'Settings saved successfully!', 'success');
 
       // Take the user straight to Controller Overview so they immediately
       // see the effect of what they just saved, instead of leaving them on
@@ -5535,7 +5649,7 @@ async function saveSettings() {
         await runMonthlyReview(targetMonth);
       }
     } else {
-      showToast('Save failed: ' + (data.error || 'Unknown error'), 'error');
+      showToast(resolveUserError(data, 'We could not save your changes.'), 'error');
     }
   } catch (e) {
     showToast('Connection error. Please try again.', 'error');
@@ -5611,7 +5725,7 @@ function renderMonitoringPanel(d) {
         '<li>Automatic alerts on new issues — no duplicate notifications</li>' +
         '<li>Runs even when you are not signed in</li>' +
       '</ul>' +
-      '<button type="button" class="btn-primary btn-small" onclick="showUpgradeModal(\'Automatic scheduled monitoring is available on the Growth and Custom AI plans. Manual analysis stays unlimited on Starter.\')">Unlock automatic monitoring</button>' +
+      '<button type="button" class="btn-primary btn-small" onclick="showUpgradeModal(\'Automatic scheduled monitoring is available on the Growth and Custom Guidance plans. Manual analysis stays unlimited on Starter.\')">Unlock automatic monitoring</button>' +
     '</div>';
 
     if (mon.lastRunAt) {
@@ -5660,7 +5774,7 @@ function saveMonitoring() {
         }
         loadNotifications();
       } else if (d && d.error === 'upgrade_required') {
-        showUpgradeModal(d.message || 'Automatic scheduled monitoring is available on the Growth and Custom AI plans.');
+        showUpgradeModal(d.message || 'Automatic scheduled monitoring is available on the Growth and Custom Guidance plans.');
         loadMonitoring();
       } else { showToast('Could not update monitoring.', 'error'); }
     }).catch(function() { showToast('Could not update monitoring.', 'error'); });
@@ -5813,7 +5927,7 @@ function renderTeamPanel(d) {
         '<li>Granular permissions: view, edit, approve, comment, resolve</li>' +
         '<li>Comment on and resolve findings together</li>' +
       '</ul>' +
-      '<button type="button" class="btn-primary btn-small" onclick="showUpgradeModal(\'Team members, roles and accountant collaboration are available on the Growth and Custom AI plans.\')">Unlock team collaboration</button>' +
+      '<button type="button" class="btn-primary btn-small" onclick="showUpgradeModal(\'Team members, roles and accountant collaboration are available on the Growth and Custom Guidance plans.\')">Unlock team collaboration</button>' +
     '</div>';
 
     /* Still show what each role can do, so the value is concrete. */
@@ -5922,7 +6036,7 @@ function inviteTeamMember() {
       loadTeam();
     } else {
       if (d && d.error === 'upgrade_required') {
-        showUpgradeModal(d.message || 'Team collaboration is available on the Growth and Custom AI plans.');
+        showUpgradeModal(d.message || 'Team collaboration is available on the Growth and Custom Guidance plans.');
         loadTeam();
         return;
       }

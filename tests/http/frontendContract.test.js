@@ -800,3 +800,82 @@ test("[FN8] the upstream work she is based on is credited", () => {
   const css = fs.readFileSync(path.join(__dirname, "../../public/styles.css"), "utf-8");
   assert.match(css, /bloub/, "and the stylesheet carries the credit too");
 });
+
+/* ── Which months you are allowed to analyse ───────────────────────
+   Reported from production: Zoho Books held June, and clicking June opened the
+   upload page instead of analysing it.
+
+   Nothing was wrong with the Zoho fetch — it returned June's 14 transactions
+   throughout. The month picker gates on `availablePeriods`, and two separate
+   paths reported "no month has data" when the truth was "we cannot tell from
+   here":
+
+     1. /api/analysis/periods answered `periods: []` whenever persistence was
+        unavailable. With no DATABASE_URL that is every user, including one
+        whose accounting system is full.
+     2. Neither periods source knew a LIVE source was connected. Zoho can fetch
+        any period on demand, so gating on "already analysed" is circular: June
+        could not be analysed because June had not been analysed.
+
+   Unknown must stay unknown — the same rule the rest of this codebase applies
+   to money, applied to periods. */
+
+test("[F-PER1] unknown periods leave every month clickable", () => {
+  const start = APP_JS.indexOf("function applyAvailablePeriods");
+  const body = APP_JS.slice(start, APP_JS.indexOf("async function loadImportHistory"));
+
+  assert.match(body, /if \(m\.live_source\) \{ appState\.availablePeriods = null; return; \}/,
+    "a live source means any month may have data");
+  assert.match(body, /m\.persistence === 'unavailable'/,
+    "and so does not being able to see stored runs at all");
+  assert.match(body, /list === null \|\| list === undefined/,
+    "an absent list is unknown, not empty");
+});
+
+test("[F-PER2] both period sources go through that one decision", () => {
+  /* Two loaders set availablePeriods. Leaving either to assign it directly is
+     how they drift apart and one of them re-introduces the funnel. */
+  const raw = APP_JS.match(/appState\.availablePeriods\s*=/g) || [];
+  const insideHelper = APP_JS.slice(
+    APP_JS.indexOf("function applyAvailablePeriods"),
+    APP_JS.indexOf("async function loadImportHistory")).match(/appState\.availablePeriods\s*=/g) || [];
+  assert.equal(raw.length - insideHelper.length, 1,
+    "only the `availablePeriods: null` state declaration assigns it outside the helper");
+
+  assert.match(APP_JS, /applyAvailablePeriods\(\s*\n?\s*imports\.filter/,
+    "the uploads loader uses it");
+  assert.match(APP_JS, /applyAvailablePeriods\(\s*\n?\s*d\.periods === null/,
+    "and so does the analysis-periods loader");
+});
+
+test("[F-PER3] a genuinely empty month still routes to import", () => {
+  /* The fix must not blanket-enable every month. Without a live source and
+     with persistence working, a month with no data is still dimmed — that
+     behaviour was correct and is what stops an analysis of nothing. */
+  const start = APP_JS.indexOf("function analysisScopeBodyHtml");
+  const body = APP_JS.slice(start, start + 2500);
+  assert.match(body, /var known = !have \|\| have\.indexOf\(m\) !== -1;/,
+    "null still means every month is offered");
+  // The source escapes its quotes: navigate(\'import\').
+  assert.match(body, /month-btn-empty[\s\S]*?navigate\(\\?'import\\?'\)/,
+    "and an unknown-to-the-server month still offers import");
+});
+
+test("[F-PER4] the server distinguishes 'cannot see' from 'none', and names a live source",
+  async () => {
+    const c = await server.primedClient();
+    const periods = await c.get("/api/analysis/periods");
+    assert.equal(periods.status, 200);
+
+    /* This suite runs without DATABASE_URL, which is precisely the reported
+       deployment. `[]` here is the bug; `null` is the honest answer. */
+    assert.equal(periods.json.persistence, "unavailable");
+    assert.equal(periods.json.periods, null,
+      "an unreadable index reports null, never an empty list");
+    assert.equal(Object.prototype.hasOwnProperty.call(periods.json, "live_source"), true,
+      "and whether a source could supply a period on demand");
+
+    const uploads = await c.get("/api/financial-data/uploads");
+    assert.equal(Object.prototype.hasOwnProperty.call(uploads.json, "live_source"), true,
+      "the uploads index carries the same signal");
+  });

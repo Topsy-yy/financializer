@@ -86,6 +86,67 @@ const PLANS = {
   }
 };
 
+
+/* ── WHAT THE CUSTOMER SEES ON THEIR PHONE ─────────────────────────
+ *
+ * Safaricom shows `AccountReference` as the "Account" on the STK prompt, and it
+ * is what appears on the payer's M-Pesa statement weeks later. It used to be
+ * the payment UUID — "26d006b05d96" — which tells a customer nothing at the
+ * moment they are deciding whether to enter their PIN, and nothing at all when
+ * they are reconciling their statement later.
+ *
+ * DARAJA'S LIMITS ARE HARD: AccountReference 12 characters, TransactionDesc 13.
+ * The adapter used to slice blindly, so "Custom AI plan" reached the handset as
+ * "Custom AI pla". These labels are written out per plan so the truncation
+ * cannot happen and so the wording is a decision rather than an accident.
+ *
+ * NOT A CORRELATION KEY. Settlement matches on the provider's own
+ * CheckoutRequestID, never on this, so it is free to be human-readable. */
+const DARAJA_ACCOUNT_MAX = 12;
+const DARAJA_DESC_MAX = 13;
+
+/* THE SENTENCE THE PAYER READS IS ASSEMBLED BY SAFARICOM, NOT BY US:
+ *
+ *     Pay KES 2,500 to  FINANCIALIZER      <- the shortcode's REGISTERED name
+ *     Account: Growth Plan                 <- AccountReference, ours
+ *
+ * The business name is whatever the paybill or till is registered as with
+ * Safaricom. There is no API field for it — in sandbox it is Safaricom's own
+ * test merchant name, and in production it is set during paybill onboarding.
+ * So the closest we can get to "Financializer - Growth Plan" is to put the
+ * PLAN in the account reference and let the registered name supply the rest.
+ *
+ * "Financializer" is 13 characters and does not fit AccountReference's 12, so
+ * it goes in the description instead, where it also reaches the statement. */
+const CHECKOUT_LABELS = Object.freeze({
+  growth: { account: "Growth Plan", description: "Financializer" },
+  custom: { account: "Custom AI", description: "Financializer" },
+  workspace: { account: "Workspace", description: "Financializer" }
+});
+
+/* Used when a plan has no explicit label, or has one that would not fit. Safe
+   and generic beats a name cut off mid-word. */
+const CHECKOUT_FALLBACK = Object.freeze({ account: "FinGuard", description: "Subscription" });
+
+/**
+ * The account reference and description to show the payer for a plan.
+ *
+ * Falls back rather than truncating: a label that does not fit is a
+ * configuration mistake, and showing "FinGuard / Subscription" is honest where
+ * "Accountant Wo" is just broken. `tests/ops/mpesaAdapter.test.js` fails if any
+ * sellable plan relies on the fallback, so the mistake is caught in CI rather
+ * than on a customer's handset.
+ */
+function checkoutLabelsFor(planKeyName) {
+  const chosen = CHECKOUT_LABELS[planKeyName];
+  if (!chosen) return CHECKOUT_FALLBACK;
+  if (chosen.account.length > DARAJA_ACCOUNT_MAX
+    || chosen.description.length > DARAJA_DESC_MAX) {
+    return CHECKOUT_FALLBACK;
+  }
+  return chosen;
+}
+
 /** Currency for all pricing. Single market for now; not a client input. */
 const BILLING_CURRENCY = "KES";
 
@@ -428,8 +489,24 @@ function requiredPlanFor(feature) {
   return "growth";
 }
 
-function currentPeriod() {
-  return new Date().toISOString().slice(0, 7); // YYYY-MM
+function creditWindowHours() {
+  const raw = Number(process.env.CREDIT_WINDOW_HOURS || 12);
+  if (!Number.isInteger(raw) || raw <= 0 || raw > 24) return 12;
+  // Keep deterministic UTC boundaries; unsupported divisors fall back safely.
+  if (24 % raw !== 0) return 12;
+  return raw;
+}
+
+function currentPeriod(now = new Date()) {
+  const d = new Date(now);
+  const window = creditWindowHours();
+  const slotHour = Math.floor(d.getUTCHours() / window) * window;
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  const hour = String(slotHour).padStart(2, "0");
+  // Example (12h windows): 2026-08-31:00 or 2026-08-31:12
+  return `${y}-${m}-${day}:${hour}`;
 }
 
 function planKey(profile) {
@@ -464,8 +541,9 @@ function byokReady(profile) {
   return isByok(profile) && hasOwnKey(profile);
 }
 
-// Refill credits at the start of each calendar month (no cron needed —
-// lazily reconciled whenever the profile is touched). Returns true if changed.
+// Refill credits at the start of each credit window (default: every 12 hours,
+// no cron needed — lazily reconciled whenever the profile is touched).
+// Returns true if changed.
 function ensurePeriod(profile) {
   if (!profile) return false;
   const period = currentPeriod();
@@ -614,6 +692,7 @@ function getEntitlement(profile) {
     credits: unmetered ? null : profile.credits,
     allowance: unmetered ? null : PLANS[key].allowance,
     period: profile.creditsPeriod,
+    credit_window_hours: creditWindowHours(),
     credit_costs: CREDIT_COSTS,
     features: featureMap(profile),
     feature_copy: FEATURE_COPY,
@@ -640,6 +719,8 @@ function setPlan(profile, plan) {
 
 module.exports = {
   PLANS, BILLING_CURRENCY, sellablePlans, priceFor,
+  CHECKOUT_LABELS, CHECKOUT_FALLBACK, checkoutLabelsFor,
+  DARAJA_ACCOUNT_MAX, DARAJA_DESC_MAX,
   PLANS,
   CREDIT_COSTS,
   PLAN_CAPABILITIES,
@@ -660,6 +741,7 @@ module.exports = {
   upgradePayload,
   featureMap,
   currentPeriod,
+  creditWindowHours,
   ensurePeriod,
   isByok,
   hasOwnKey,

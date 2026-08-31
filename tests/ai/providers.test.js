@@ -33,8 +33,7 @@ const CONFIG = Object.freeze({
  * silently undo a deliberately-broke fixture.
  */
 function currentPeriod() {
-  const d = new Date();
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+  return entitlements.currentPeriod();
 }
 function profileOn(plan, extra = {}) {
   return Object.assign(

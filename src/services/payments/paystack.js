@@ -6,8 +6,12 @@
 //   1. IT SIGNS ITS WEBHOOKS. Paystack sends `x-paystack-signature`, an
 //      HMAC-SHA512 of the RAW request body keyed with the secret key. Daraja
 //      sends no signature at all — with it, a callback can only be
-//      authenticated by IP allowlisting plus a re-query, which is slower,
-//      rate-limited and easy to get subtly wrong. A payment webhook that
+//      authenticated by IP allowlisting and/or a re-query, which is slower,
+//      rate-limited and easy to get subtly wrong. For the record: THIS
+//      repository authenticates Daraja callbacks by re-query alone (see the
+//      webhook route). It runs no IP allowlist, deliberately — the ranges are
+//      not authoritatively published and rejecting a genuine callback would
+//      strand a customer who has paid. A payment webhook that
 //      cannot be cryptographically verified is the weakest link in a billing
 //      system, and this is a billing system.
 //   2. REGULATORY SAFETY. Paystack has held a CBK Payment Service Provider

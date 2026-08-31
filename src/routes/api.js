@@ -835,7 +835,7 @@ function aiUnavailableNote(reason) {
     case "managed_key_unavailable":
       return "⚠️ The managed AI service isn't configured on this server. Here's a rule-based summary from the analysis engine instead:";
     case "insufficient_credits":
-      return "⚠️ You're out of AI credits this month, so this is a rule-based summary — not an AI answer. Upgrade or add your own key in Settings.";
+      return "⚠️ You're out of AI credits for the current cycle, so this is a rule-based summary — not an AI answer. Upgrade or add your own key in Settings.";
     case "timeout":
       return "⚠️ The AI took too long to respond, so here's a rule-based summary instead. Try again in a moment for a full AI answer.";
     case "request_failed":
@@ -1540,7 +1540,11 @@ router.get("/financial-data/uploads", async (req, res) => {
     ok: true,
     // The bare list is kept for the existing contract.
     periods: periods.map((p) => p.period),
-    imports: periods
+    imports: periods,
+    /* Imports are not the whole story for a connected business — see
+       liveSourceFor(). Without this the month picker sends a Zoho user to the
+       upload page for a month Zoho is holding. */
+    live_source: liveSourceFor(req.userStore)
   });
 });
 
@@ -2149,13 +2153,36 @@ if (process.env.NODE_ENV === "test") {
    ═══════════════════════════════════════════════════════════════ */
 
 /** Which periods this tenant has a completed analysis for. */
+/**
+ * A source that can fetch ANY period on demand, rather than one that only holds
+ * what was already imported.
+ *
+ * This distinction decides whether the month picker may offer a month the user
+ * has never analysed. A Zoho-connected business has June available even though
+ * nothing about June is stored yet — the data is one request away.
+ */
+function liveSourceFor(store) {
+  var profile = (store && store.profile) || {};
+  return profile.zohoRefreshToken ? "zoho-books" : null;
+}
+
 router.get("/analysis/periods", async (req, res) => {
+  const liveSource = liveSourceFor(req.userStore);
   if (!req.userStore.tenantId || !dbPool.isConfigured()) {
-    return res.json({ ok: true, periods: [], persistence: "unavailable" });
+    /* PERSISTENCE IS UNAVAILABLE, WHICH IS NOT THE SAME AS "NO PERIODS".
+       This returned an empty list, and the client read it as "no month has any
+       data" and dimmed all twelve. On a deployment without DATABASE_URL that
+       described every user, including one whose Zoho account was full of
+       records. `periods: null` says we cannot see them from here. */
+    return res.json({
+      ok: true, periods: null, persistence: "unavailable", live_source: liveSource
+    });
   }
   try {
     const periods = await analysisRunRepository.completedPeriods(req.userStore.tenantId);
-    res.json({ ok: true, periods, persistence: "database" });
+    /* `live_source` tells the client that a stored analysis is not the only way
+       a month can have data: Zoho can supply one on request. */
+    res.json({ ok: true, periods, persistence: "database", live_source: liveSource });
   } catch (err) {
     logger.error("analysis.periods_failed", { error: err.message });
     res.status(503).json({ ok: false, error: "analysis_index_unavailable" });
@@ -2788,6 +2815,17 @@ router.get("/billing/payments", async (req, res) => {
 });
 
 /**
+ * A phone number as the payer should see it echoed back: enough to confirm we
+ * are prompting the right handset, not enough to be a full number on a shared
+ * screen.
+ */
+function maskPhone(input) {
+  const digits = String(input || "").replace(/[^0-9]/g, "");
+  if (digits.length < 6) return "your phone";
+  return `${digits.slice(0, 4)}\u2026${digits.slice(-3)}`;
+}
+
+/**
  * START A CHECKOUT.
  *
  * The ONLY client input is `plan` (a key) and `phone` (where to send the
@@ -2832,6 +2870,11 @@ router.post("/billing/checkout", async (req, res) => {
       detail: "Enter the phone number to send the payment request to." });
   }
 
+  /* What the payer will see on their handset and, later, on their M-Pesa
+     statement. From the catalog, so it is a product decision rather than a
+     side effect of how a plan happens to be named. */
+  const checkoutLabels = entitlements.checkoutLabelsFor(price.plan);
+
   try {
     // The row is written FIRST, with OUR amount, so nothing later can change it.
     const payment = await billingRepository.createPayment(req.userStore.tenantId, {
@@ -2845,9 +2888,14 @@ router.post("/billing/checkout", async (req, res) => {
     const initiated = await adapter.initiatePayment({
       amount: price.amount,
       currency: price.currency,
+      /* `reference` stays the payment id: Paystack echoes it back and
+         correlates on it. M-Pesa does NOT — it correlates on Safaricom's own
+         CheckoutRequestID — so the reference the CUSTOMER sees is passed
+         separately and can be readable. */
       reference: String(payment.id).replace(/-/g, "").slice(0, 12),
       payerReference,
-      description: `${price.label} plan`
+      accountReference: checkoutLabels.account,
+      description: checkoutLabels.description
     });
 
     if (!initiated.ok || !initiated.providerRef) {
@@ -2873,6 +2921,14 @@ router.post("/billing/checkout", async (req, res) => {
       ok: true,
       status: "pending",
       payment_id: payment.id,
+      /* WHAT WE PUT ON THEIR PHONE, so the UI can tell them what to look for
+         instead of leaving them staring at a handset wondering whether the
+         prompt they can see is ours. */
+      prompt: {
+        account: checkoutLabels.account,
+        description: checkoutLabels.description,
+        phone: maskPhone(payerReference)
+      },
       plan: price.plan,
       amount: price.amount,
       currency: price.currency,
@@ -2947,10 +3003,37 @@ router.post("/billing/webhook/:provider", async (req, res) => {
    * (HMAC-SHA512 over the raw body). The check runs FIRST: an unverified
    * payload is not parsed, not correlated, and not logged in full.
    *
-   * An adapter that cannot sign (direct Daraja emits no signature at all)
-   * exposes no `verifySignature`, and is documented as relying on correlation,
-   * the pending-only guard and an IP allowlist instead. The distinction is
-   * explicit rather than an absent check nobody notices. */
+   * AN ADAPTER THAT CANNOT SIGN. Direct Daraja emits no signature at all, so
+   * `verifySignature` is absent and this check is skipped. That is a real gap
+   * and it is named here rather than left as an absent check nobody notices.
+   *
+   * THIS COMMENT USED TO CLAIM AN IP ALLOWLIST WAS PART OF THE MITIGATION. No
+   * allowlist existed anywhere in the codebase, and one was deliberately not
+   * added: Safaricom's callback ranges are documented by the community rather
+   * than published as a stable, versioned list, and those same sources warn
+   * that new source IPs appear without notice. Rejecting a genuine callback
+   * from a new Safaricom IP would leave a customer who has actually paid stuck
+   * on `pending` — and the status route only READS the stored payment, so
+   * nothing would ever settle it. That failure is worse than the forgery this
+   * would defend against, which R5 below already defeats.
+   *
+   * WHAT ACTUALLY PROTECTS AN UNSIGNED CALLBACK, all of it enforced below or in
+   * billingRepository.settlePaymentAndActivate:
+   *
+   *   CORRELATION       the callback must carry a provider reference we issued
+   *                     at checkout; an unknown reference resolves to no tenant
+   *                     and settles nothing.
+   *   PENDING ONLY      only a `pending` payment can be settled, so a replay
+   *                     finds the row already `successful` and is a no-op.
+   *   R5 VERIFICATION   Safaricom is re-queried over a connection WE open
+   *                     before anything is granted. A forged callback is
+   *                     contradicted there and activates nothing.
+   *   OUR OWN AMOUNT    the sum charged comes from the payment row written at
+   *                     checkout, never from the callback body.
+   *   ATOMIC + UNIQUE   settlement and activation are one transaction under a
+   *                     row lock, with UNIQUE (provider, provider_ref), so
+   *                     concurrent deliveries produce exactly one activation.
+   */
   if (typeof adapter.verifySignature === "function") {
     const check = adapter.verifySignature({
       rawBody: req.rawBody, headers: req.headers

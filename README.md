@@ -170,6 +170,34 @@ Use `.env.example` as your template. Key settings include:
 - risk hints and alerts: `BUSINESS_OWNER_KEYWORDS`, `ALERT_EMAILS`
 - Avalanche optional settings: `ENABLE_AVALANCHE`, `AVALANCHE_*`, `ENABLE_AVALANCHE_CONTRACT_DEPLOY`
 
+## Admin Credit Operations
+
+Credit top-ups and reversals are backend-only operations. They are intentionally not exposed as public API routes.
+
+Commands:
+
+```bash
+# Grant credits to a tenant/workspace
+npm run credits:grant -- --tenant-id <tenant-uuid> --amount 5000 --reason promo
+
+# Grant credits by member email (must resolve to one active tenant)
+npm run credits:grant -- --email founder@company.com --amount 2000 --reason goodwill
+
+# Revoke previously granted credits
+npm run credits:revoke -- --tenant-id <tenant-uuid> --amount 500 --reason correction
+
+# Revoke by member email
+npm run credits:revoke -- --email founder@company.com --amount 250 --reason duplicate-topup
+```
+
+Notes:
+
+- Credit periods are window-based (default 12-hour windows).
+- If `--period` is omitted, scripts target the current period window.
+- Credits are workspace-shared at tenant scope, not per individual member.
+- Revoke operations are atomic and fail safely if credits were already consumed.
+- Use environment limits for safety in production: `MAX_CREDIT_GRANT` and `MAX_CREDIT_REVOKE`.
+
 ## Output Artifacts
 
 Monthly reviews generate timestamped files in `data/reports/`:

@@ -123,6 +123,118 @@ async function refund(tenantId, { period, cost, operation, interactionId = null 
   });
 }
 
+/**
+ * Grant additional credits in the active period.
+ *
+ * A grant increases both `credits` and `allowance` so the top-up is not later
+ * clamped away by a refund path that caps to allowance.
+ */
+async function grant(tenantId, {
+  period,
+  amount,
+  operation = "manual_grant",
+  interactionId = null
+}) {
+  if (!Number.isInteger(amount) || amount <= 0) {
+    throw new Error(`grant amount must be a positive integer, got ${amount}`);
+  }
+  return withTenant(tenantId, async (client) => {
+    const { rows } = await client.query(
+      `UPDATE credit_balance
+          SET credits = credits + $3,
+              allowance = allowance + $3,
+              updated_at = now()
+        WHERE tenant_id = $1 AND period = $2
+        RETURNING credits, allowance`,
+      [tenantId, period, amount]
+    );
+    if (!rows.length) return { ok: false, reason: "no_balance", amount, remaining: 0 };
+
+    await client.query(
+      `INSERT INTO credit_transaction
+         (tenant_id, period, operation, cost, balance_after, interaction_id)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [tenantId, period, operation, -amount, rows[0].credits, interactionId]
+    );
+
+    return {
+      ok: true,
+      amount,
+      remaining: rows[0].credits,
+      allowance: rows[0].allowance,
+      reason: null
+    };
+  });
+}
+
+/**
+ * Revoke previously granted credits in the active period.
+ *
+ * This decreases both `credits` and `allowance` to reverse a prior top-up while
+ * preserving the invariant that credits never go negative.
+ */
+async function revokeGrant(tenantId, {
+  period,
+  amount,
+  operation = "manual_revoke",
+  interactionId = null
+}) {
+  if (!Number.isInteger(amount) || amount <= 0) {
+    throw new Error(`revoke amount must be a positive integer, got ${amount}`);
+  }
+
+  return withTenant(tenantId, async (client) => {
+    const { rows } = await client.query(
+      `UPDATE credit_balance
+          SET credits = credits - $3,
+              allowance = allowance - $3,
+              updated_at = now()
+        WHERE tenant_id = $1
+          AND period = $2
+          AND credits >= $3
+          AND allowance >= $3
+        RETURNING credits, allowance`,
+      [tenantId, period, amount]
+    );
+
+    if (!rows.length) {
+      const { rows: existing } = await client.query(
+        "SELECT credits, allowance FROM credit_balance WHERE tenant_id = $1 AND period = $2",
+        [tenantId, period]
+      );
+
+      if (!existing.length) {
+        return { ok: false, reason: "no_balance", amount, remaining: 0, allowance: 0 };
+      }
+
+      const balance = existing[0];
+      const reason = Number(balance.credits) < amount ? "insufficient_credits" : "insufficient_allowance";
+      return {
+        ok: false,
+        reason,
+        amount,
+        remaining: Number(balance.credits),
+        allowance: Number(balance.allowance)
+      };
+    }
+
+    await client.query(
+      `INSERT INTO credit_transaction
+         (tenant_id, period, operation, cost, balance_after, interaction_id)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [tenantId, period, operation, amount, rows[0].credits, interactionId]
+    );
+
+    return {
+      ok: true,
+      amount,
+      remaining: rows[0].credits,
+      allowance: rows[0].allowance,
+      reason: null
+    };
+  });
+}
+
 async function getBalance(tenantId, period) {
   return withTenant(tenantId, async (client) => {
     const { rows } = await client.query(
@@ -151,4 +263,4 @@ function available() {
   return isConfigured();
 }
 
-module.exports = { ensureBalance, consume, refund, getBalance, history, available };
+module.exports = { ensureBalance, consume, refund, grant, revokeGrant, getBalance, history, available };
