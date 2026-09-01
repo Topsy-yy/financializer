@@ -27,6 +27,10 @@ services:
         value: "false"
       - key: SESSION_SECRET
         generateValue: true  # Render generates a strong secret
+      - key: SECRETS_KEY
+        generateValue: true  # required for encrypted stored credentials
+      - key: DATABASE_URL
+        sync: false          # Render PostgreSQL INTERNAL URL in same region
       # --- set these in the Render dashboard (kept out of git) ---
       - key: APP_BASE_URL       # e.g. https://finguard-ai.onrender.com  or  https://yourdomain.xyz
         sync: false

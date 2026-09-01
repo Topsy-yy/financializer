@@ -160,6 +160,29 @@ npm run dev
 
 `http://localhost:8080`
 
+## PostgreSQL Persistence Setup
+
+Production startup requires both `DATABASE_URL` and `SECRETS_KEY`.
+
+Initialize a fresh PostgreSQL database:
+
+```bash
+npm run db:bootstrap
+```
+
+Run migrations only:
+
+```bash
+npm run db:migrate
+```
+
+Notes:
+
+- `db:bootstrap` is the deterministic first-time setup flow (database role + schema + grants checks).
+- `db:migrate` is forward-only and idempotent for existing environments.
+- In production, use Render PostgreSQL internal connection URL for `DATABASE_URL` when app and DB are in the same region.
+- Production startup validates DB reachability and schema/migration compatibility before serving traffic.
+
 ## Environment Configuration
 
 Use `.env.example` as your template. Key settings include:

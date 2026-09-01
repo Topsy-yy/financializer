@@ -60,6 +60,7 @@ const conversationStore = require("../ai/copilot/conversation");
 const copilotStore = require("../ai/copilot/store");
 const aiAuditRepository = require("../db/repositories/aiAuditRepository");
 const creditRepository = require("../db/repositories/creditRepository");
+const profileRepository = require("../db/repositories/profileRepository");
 const transactionRepository = require("../db/repositories/transactionRepository");
 // The ONE authoritative reading of a cash balance (domain/model/cashPosition).
 const { readCashPosition } = require("../domain/model/cashPosition");
@@ -170,6 +171,10 @@ function profileFilePath(reportsDir) {
   return path.join(reportsDir, "profile.json");
 }
 
+function canUseDatabaseProfile(userStore) {
+  return Boolean(userStore && userStore.tenantId && dbPool.isConfigured() && profileRepository.available());
+}
+
 /**
  * Persist a profile.
  *
@@ -190,7 +195,7 @@ function profileFilePath(reportsDir) {
  *
  * @returns {object} { ok, reason, detail }
  */
-function persistProfile(userStore) {
+async function persistProfileAsync(userStore) {
   let sealed;
   try {
     // Credentials are encrypted at rest (docs/THREAT_MODEL.md T5). Legacy
@@ -208,6 +213,20 @@ function persistProfile(userStore) {
     };
   }
 
+  if (canUseDatabaseProfile(userStore)) {
+    try {
+      await profileRepository.upsert(userStore.tenantId, sealed);
+      return { ok: true, persisted: "database" };
+    } catch (e) {
+      logger.error("profile.persist_failed", { error: e.message, target: "database" });
+      return {
+        ok: false,
+        reason: "write_failed",
+        detail: "The profile could not be written to the database."
+      };
+    }
+  }
+
   const target = profileFilePath(userStore.reportsDir);
   const temp = `${target}.tmp-${process.pid}-${Date.now()}`;
   try {
@@ -215,12 +234,19 @@ function persistProfile(userStore) {
     // rename() is atomic within a filesystem: readers see either the old file
     // or the new one, never a partial write.
     fs.renameSync(temp, target);
-    return { ok: true };
+    return { ok: true, persisted: "disk" };
   } catch (e) {
     try { if (fs.existsSync(temp)) fs.unlinkSync(temp); } catch { /* best effort */ }
     logger.error("profile.persist_failed", { error: e.message });
     return { ok: false, reason: "write_failed", detail: "The profile could not be written to disk." };
   }
+}
+
+function persistProfile(userStore) {
+  persistProfileAsync(userStore).catch((e) => {
+    logger.error("profile.persist_failed", { error: e.message, target: "background" });
+  });
+  return { ok: true, reason: "pending_background_write" };
 }
 
 /**
@@ -229,8 +255,8 @@ function persistProfile(userStore) {
  * On failure it sends an honest error instead of a success the user cannot
  * rely on. Returns true when the caller may continue.
  */
-function persistCredentialOrFail(res, userStore, what) {
-  const result = persistProfile(userStore);
+async function persistCredentialOrFail(res, userStore, what) {
+  const result = await persistProfileAsync(userStore);
   if (result.ok) return true;
   res.status(503).json({
     ok: false,
@@ -247,6 +273,30 @@ function loadPersistedProfile(reportsDir) {
     return secretStore.openProfile(raw);
   } catch (e) {
     return null;
+  }
+}
+
+async function hydrateProfileFromDatabase(userStore) {
+  if (!userStore || userStore.profileHydratedFromDatabase) return;
+  if (!canUseDatabaseProfile(userStore)) {
+    userStore.profileHydratedFromDatabase = true;
+    return;
+  }
+
+  try {
+    const row = await profileRepository.load(userStore.tenantId);
+    if (row && row.profile && typeof row.profile === "object") {
+      userStore.profile = Object.assign(defaultProfile(), secretStore.openProfile(row.profile));
+    } else {
+      const seeded = await persistProfileAsync(userStore);
+      if (!seeded.ok) {
+        logger.warn("profile.seed_failed", { reason: seeded.reason });
+      }
+    }
+  } catch (e) {
+    logger.error("profile.hydrate_failed", { error: e.message });
+  } finally {
+    userStore.profileHydratedFromDatabase = true;
   }
 }
 
@@ -305,7 +355,7 @@ function getUserStoreById(id) {
     fs.mkdirSync(reportsDir, { recursive: true });
     // A dev-server restart (nodemon) or process redeploy would otherwise wipe
     // every profile back to defaults, silently losing saved API keys.
-    const persisted = loadPersistedProfile(reportsDir);
+    const persisted = dbPool.isConfigured() ? null : loadPersistedProfile(reportsDir);
     userStores.set(id, {
       id,
       profile: Object.assign(defaultProfile(), persisted || {}),
@@ -428,6 +478,7 @@ router.use(async (req, res, next) => {
         req.userStore.userIdentity = identity;
       }
     }
+    await hydrateProfileFromDatabase(req.userStore);
 
     /* THE ENTITLEMENT RESOLVER (JOB P6).
      *
@@ -1294,7 +1345,7 @@ router.get("/auth/google/callback", async (req, res) => {
     googleStore.profile.googleName = profile.name || "";
     googleStore.profile.googleEmail = profile.email || "";
     googleStore.profile.googlePicture = profile.picture || "";
-    const saved = persistProfile(googleStore);
+    const saved = await persistProfileAsync(googleStore);
     if (!saved.ok) {
       logger.error("auth.google.persist_failed", { reason: saved.reason });
       return res.redirect(`/app?auth=error&reason=${encodeURIComponent(saved.reason)}`);
@@ -1621,7 +1672,7 @@ router.get("/oauth/zoho/callback", async (req, res) => {
     if (pendingProfile?.businessName) req.userStore.profile.businessName = pendingProfile.businessName;
     if (pendingProfile?.zohoOrgId) req.userStore.profile.zohoOrgId = pendingProfile.zohoOrgId;
 
-    const saved = persistProfile(req.userStore);
+    const saved = await persistProfileAsync(req.userStore);
     if (!saved.ok) {
       /* The Zoho tokens could not be stored. Redirecting to `oauth=success`
          would tell the user their accounting connection is live when the
@@ -1716,7 +1767,7 @@ router.get("/profile", (req, res) => {
   });
 });
 
-router.post("/profile", (req, res) => {
+router.post("/profile", async (req, res) => {
   const {
     userName,
     businessName,
@@ -1775,7 +1826,7 @@ router.post("/profile", (req, res) => {
   if (resolvedAiAssistant) req.userStore.profile.aiAssistant = resolvedAiAssistant;
   /* This route can be saving an AI API key or a Zoho key. A silent failure
      here previously told the user their key was stored when it was not. */
-  if (!persistCredentialOrFail(res, req.userStore, "Your settings")) return;
+  if (!await persistCredentialOrFail(res, req.userStore, "Your settings")) return;
   res.json({ ok: true });
 });
 

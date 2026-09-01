@@ -33,6 +33,22 @@ on the platform's default.
 
 ## Minimum to run
 
+## Production Startup Database Preflight
+
+On production boot, startup now validates database readiness before listening for HTTP traffic.
+
+Checks performed:
+
+- `DATABASE_URL` must be configured (existing fatal check).
+- PostgreSQL must be reachable.
+- `schema_migration` table must exist.
+- All repository migration files in `src/db/migrations/` must be applied.
+- Required runtime tables must exist (tenancy, subscriptions, credits, AI audit, analysis, profile state).
+
+If any check fails, startup exits with a clear fatal error and does not serve requests.
+
+This prevents production from running against a partially initialized or incompatible schema.
+
 **Development** — nothing. It starts, warns about what is missing, and works in
 memory.
 

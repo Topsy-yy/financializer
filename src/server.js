@@ -19,6 +19,7 @@ const config = require("./config");
 const apiRouter = require("./routes/api");
 const { logger, requestLogging } = require("./services/logger");
 const startupValidation = require("./services/startupValidation");
+const { verifyProductionDatabase } = require("./services/startupDatabaseValidation");
 const { createSessionStore } = require("./services/sessionStore");
 const httpSecurity = require("./services/httpSecurity");
 
@@ -198,11 +199,11 @@ app.use("/api", apiRouter);
 
 /* Exported for the end-to-end suite, which drives the REAL app rather than a
    reconstruction of it. */
-module.exports = { app, sessionStore };
+async function startServer() {
+  // Production must not start on a schema that is missing/incompatible.
+  await verifyProductionDatabase({ log });
 
-/* istanbul ignore next -- only the process entry point starts a listener. */
-if (require.main === module) {
-  app.listen(config.port, () => {
+  return app.listen(config.port, () => {
     log.info("server.started", {
       port: config.port,
       mode: process.env.NODE_ENV || "development",
@@ -222,5 +223,19 @@ if (require.main === module) {
       apiRouter.startMonitoring();
       log.info("monitoring.scheduler.started");
     }
+  });
+}
+
+module.exports = { app, sessionStore, startServer };
+
+/* istanbul ignore next -- only the process entry point starts a listener. */
+if (require.main === module) {
+  startServer().catch((err) => {
+    log.error("startup refused", {
+      error: err.message,
+      detail: err.detail || null,
+      code: err.code || null
+    });
+    process.exit(1);
   });
 }

@@ -36,7 +36,9 @@ const pool = require("../../src/db/pool");
 const tenants = require("../../src/db/repositories/tenantRepository");
 const txns = require("../../src/db/repositories/transactionRepository");
 const runs = require("../../src/db/repositories/analysisRunRepository");
+const profiles = require("../../src/db/repositories/profileRepository");
 const engine = require("../../src/domain/analysis/engine");
+const secretStore = require("../../src/services/secretStore");
 const { scenarios } = require("../helpers/fixtures");
 
 let A = null; // tenant A
@@ -64,7 +66,7 @@ test.before(async () => {
 
   // Clean slate (privileged: TRUNCATE requires table ownership).
   await admin((c) => c.query(
-    "TRUNCATE finding_evidence, finding, metric_value, analysis_run, financial_transaction, membership, tenant, app_user RESTART IDENTITY CASCADE"));
+    "TRUNCATE tenant_profile_state, finding_evidence, finding, metric_value, analysis_run, financial_transaction, membership, tenant, app_user RESTART IDENTITY CASCADE"));
   A = await tenants.createTenant({ name: "Alpha Traders", baseCurrency: "KES" });
   B = await tenants.createTenant({ name: "Beta Holdings", baseCurrency: "KES" });
 });
@@ -1073,4 +1075,63 @@ test("[DB52] the lifecycle advances through explicit states", { skip: SKIP }, as
   // An unknown status is refused rather than written.
   await assert.rejects(
     () => runs.markStatus(A.id, begun.runId, "finished-ish"), /unknown analysis run status/);
+});
+
+test("[DB53] tenant profile state persists encrypted credentials in PostgreSQL", { skip: SKIP }, async () => {
+  const previousKey = process.env.SECRETS_KEY;
+  process.env.SECRETS_KEY = "db-profile-secrets-key-0123456789abcdef";
+  try {
+    const profile = {
+      businessName: "Alpha Traders",
+      userName: "Aisha",
+      aiProvider: "openai",
+      aiAssistant: "controller-core",
+      aiApiKey: "sk-live-1234567890",
+      zohoApiKey: "zoho-access-abc",
+      zohoRefreshToken: "zoho-refresh-def",
+      monitoring: { enabled: true, frequency: "weekly", nextDueAt: null }
+    };
+    const sealed = secretStore.sealProfile(profile);
+    await profiles.upsert(A.id, sealed);
+
+    const storedRaw = await pool.withTenant(A.id, async (c) => {
+      const { rows } = await c.query(
+        "SELECT profile FROM tenant_profile_state WHERE tenant_id = $1",
+        [A.id]
+      );
+      return rows[0] ? rows[0].profile : null;
+    });
+    assert.ok(storedRaw, "profile row exists");
+    assert.notEqual(storedRaw.aiApiKey, profile.aiApiKey, "AI key is not persisted in plaintext");
+    assert.notEqual(storedRaw.zohoRefreshToken, profile.zohoRefreshToken, "Zoho refresh token is not persisted in plaintext");
+
+    const loaded = await profiles.load(A.id);
+    const opened = secretStore.openProfile(loaded.profile);
+    assert.equal(opened.aiApiKey, profile.aiApiKey);
+    assert.equal(opened.zohoApiKey, profile.zohoApiKey);
+    assert.equal(opened.zohoRefreshToken, profile.zohoRefreshToken);
+  } finally {
+    if (previousKey === undefined) delete process.env.SECRETS_KEY;
+    else process.env.SECRETS_KEY = previousKey;
+  }
+});
+
+test("[DB54] tenant profile state is isolated by RLS", { skip: SKIP }, async () => {
+  await profiles.upsert(A.id, { businessName: "Alpha" });
+  const leaked = await pool.withTenant(B.id, async (c) => {
+    const { rows } = await c.query(
+      "SELECT tenant_id FROM tenant_profile_state WHERE tenant_id = $1",
+      [A.id]
+    );
+    return rows;
+  });
+  assert.deepEqual(leaked, [], "tenant B cannot read tenant A profile state");
+});
+
+test("[DB55] profile state survives pool restart", { skip: SKIP }, async () => {
+  await profiles.upsert(A.id, { businessName: "Alpha Durable", userName: "Owner" });
+  await pool.close();
+  const loaded = await profiles.load(A.id);
+  assert.ok(loaded, "profile is still present after reconnect");
+  assert.equal(loaded.profile.businessName, "Alpha Durable");
 });
