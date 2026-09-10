@@ -226,7 +226,10 @@ async function startServer() {
   });
 }
 
-module.exports = { app, sessionStore, startServer };
+module.exports = app;
+module.exports.app = app;
+module.exports.sessionStore = sessionStore;
+module.exports.startServer = startServer;
 
 /* istanbul ignore next -- only the process entry point starts a listener. */
 if (require.main === module) {

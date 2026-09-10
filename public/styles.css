@@ -2957,19 +2957,231 @@ textarea:focus-visible {
 }
 
 @media (max-width: 900px) {
-  .sidebar { display: none; }
+  .dashboard-layout {
+    height: auto;
+    min-height: 100dvh;
+    overflow: visible;
+    flex-direction: column;
+  }
+
+  .main-content {
+    overflow: visible;
+    padding-bottom: 5.75rem;
+  }
+
+  .sidebar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    top: auto;
+    width: 100%;
+    min-width: 0;
+    z-index: 80;
+    border-right: none;
+    border-top: 1px solid var(--border-color);
+    background: rgba(3, 7, 18, 0.96);
+    backdrop-filter: blur(14px);
+    overflow: hidden;
+  }
+
+  .brand,
+  .sidebar-bottom {
+    display: none;
+  }
+
+  .nav-links {
+    display: flex;
+    flex-direction: row;
+    gap: 0.4rem;
+    overflow-x: auto;
+    padding: 0.55rem 0.55rem 0.65rem;
+    scrollbar-width: none;
+    white-space: nowrap;
+  }
+
+  .nav-links::-webkit-scrollbar {
+    display: none;
+  }
+
+  .nav-links li {
+    margin-bottom: 0;
+    flex: 0 0 auto;
+  }
+
+  .nav-links li a {
+    padding: 0.6rem 0.75rem;
+    font-size: 0.78rem;
+    border-radius: 999px;
+    gap: 0.4rem;
+  }
+
+  .top-header {
+    padding: 0.9rem 1rem;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: flex-start;
+  }
+
+  .top-header > div:first-child {
+    flex: 1 1 170px;
+    min-width: 0;
+  }
+
+  .page-title {
+    font-size: 1.08rem;
+    line-height: 1.25;
+  }
+
+  .header-search {
+    order: 3;
+    width: 100%;
+    max-width: 100%;
+    margin: 0;
+  }
+
+  .header-actions {
+    margin-left: auto;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .profile-popover,
+  .notif-popover {
+    position: fixed;
+    top: auto;
+    right: 0.75rem;
+    left: 0.75rem;
+    bottom: 5.25rem;
+    width: auto;
+    max-width: none;
+    max-height: 60vh;
+  }
+
+  .page-tabs {
+    padding: 0 1rem;
+  }
+
+  .page-tabs-inner {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    gap: 1rem;
+    scrollbar-width: none;
+  }
+
+  .page-tabs-inner::-webkit-scrollbar {
+    display: none;
+  }
+
+  .page-tab {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
   .grid-2col, .grid-2-1 { grid-template-columns: 1fr; }
   .grid-3col { grid-template-columns: 1fr; }
   .page-content { padding: 1.25rem 1rem; }
-  .top-header { padding: 1rem 1.25rem; }
   .kpi-row { grid-template-columns: 1fr 1fr; }
   .month-picker-grid { grid-template-columns: repeat(3, 1fr); }
+
+  .chat-page {
+    height: auto;
+    min-height: 55vh;
+  }
+
+  .chat-msg {
+    max-width: 92%;
+  }
+
+  .data-table {
+    display: block;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+
+  .settings-input {
+    max-width: 100%;
+  }
+
+  .wallet-connect-card.wallet-connect-compact .btn-primary,
+  .wallet-connect-card.wallet-connect-compact .btn-secondary,
+  .wallet-connect-card.wallet-connect-compact .btn-ghost {
+    margin-left: 0;
+    width: 100%;
+  }
 }
 
 @media (max-width: 600px) {
   .kpi-row { grid-template-columns: 1fr; }
   .month-picker-grid { grid-template-columns: repeat(2, 1fr); }
-  .signup-card { margin: 1rem; padding: 1.5rem; }
+  .signup-overlay {
+    align-items: flex-start;
+    overflow-y: auto;
+    padding: 0.9rem;
+  }
+
+  .signup-card,
+  .onboarding-wizard {
+    max-width: 100%;
+  }
+
+  .signup-card {
+    margin: 0;
+    padding: 1.15rem;
+  }
+
+  .onboarding-progress {
+    margin-bottom: 1.2rem;
+    padding-bottom: 1rem;
+  }
+
+  .progress-connector {
+    width: 32px;
+    margin: 0 0.35rem 1.05rem;
+  }
+
+  .step-label {
+    font-size: 0.62rem;
+  }
+
+  .data-source-tabs {
+    flex-direction: column;
+    border-bottom: none;
+    gap: 0.35rem;
+  }
+
+  .data-source-tab {
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+  }
+
+  .data-source-tab.active {
+    border-color: var(--color-brand);
+    background: var(--color-brand-dim);
+  }
+
+  .header-actions .header-avatar,
+  .header-actions #theme-toggle {
+    display: none;
+  }
+
+  .header-search .kbd {
+    display: none;
+  }
+
+  .notif-pop-foot {
+    flex-wrap: wrap;
+  }
+
+  .btn-full {
+    padding: 0.8rem 1rem;
+  }
+
+  .action-row {
+    flex-wrap: wrap;
+  }
+
   .signup-actions { flex-direction: column; }
 }
 /* ── Locked premium features (shown, never hidden) ───────────── */
