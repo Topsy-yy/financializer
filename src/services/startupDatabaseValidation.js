@@ -32,6 +32,10 @@ function migrationFiles() {
   return fs.readdirSync(dir).filter((f) => f.endsWith(".sql")).sort();
 }
 
+function shouldSkipDatabaseStartupCheck(env = process.env) {
+  return String(env.SKIP_DATABASE_STARTUP_CHECK || "false").toLowerCase() === "true";
+}
+
 async function verifyProductionDatabase({
   env = process.env,
   log,
@@ -41,6 +45,16 @@ async function verifyProductionDatabase({
   const mode = String(env.NODE_ENV || "development").toLowerCase();
   if (mode !== "production") {
     return { ok: true, skipped: true, reason: "not_production" };
+  }
+
+  if (shouldSkipDatabaseStartupCheck(env)) {
+    if (log && typeof log.warn === "function") {
+      log.warn("database.startup_check.skipped", {
+        mode,
+        reason: "SKIP_DATABASE_STARTUP_CHECK=true"
+      });
+    }
+    return { ok: true, skipped: true, reason: "skip_database_startup_check" };
   }
 
   if (!pool.isConfigured()) {

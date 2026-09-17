@@ -60,6 +60,36 @@ test("[DB-STARTUP-1] non-production skips startup DB validation", async () => {
   assert.equal(result.skipped, true);
 });
 
+test("[DB-STARTUP-1A] production can skip DB startup validation with explicit env flag", async () => {
+  let attemptedConnection = false;
+  const result = await verifyProductionDatabase({
+    env: {
+      NODE_ENV: "production",
+      DATABASE_URL: "postgres://x",
+      SKIP_DATABASE_STARTUP_CHECK: "true"
+    },
+    pool: {
+      isConfigured() {
+        return true;
+      },
+      getPool() {
+        return {
+          async connect() {
+            attemptedConnection = true;
+            throw new Error("should not connect when startup check is skipped");
+          }
+        };
+      }
+    },
+    getMigrationFiles: () => ["001_init.sql"]
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.skipped, true);
+  assert.equal(result.reason, "skip_database_startup_check");
+  assert.equal(attemptedConnection, false);
+});
+
 test("[DB-STARTUP-2] production fails when DATABASE_URL is absent", async () => {
   const client = makeClient();
   await assert.rejects(
